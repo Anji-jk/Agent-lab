@@ -27,6 +27,42 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
+def extract_usage(result_event: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize usage metadata from Claude's result event."""
+    if not isinstance(result_event, dict):
+        result_event = {}
+
+    usage = result_event.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+
+    def number_or_none(value: Any) -> int | float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value
+
+    return {
+        "total_cost_usd": number_or_none(result_event.get("total_cost_usd")),
+        "input_tokens": number_or_none(usage.get("input_tokens")),
+        "output_tokens": number_or_none(usage.get("output_tokens")),
+        "cache_read_input_tokens": number_or_none(usage.get("cache_read_input_tokens")),
+        "cache_creation_input_tokens": number_or_none(
+            usage.get("cache_creation_input_tokens")
+        ),
+        "num_turns": number_or_none(result_event.get("num_turns")),
+        "is_error": (
+            result_event.get("is_error")
+            if isinstance(result_event.get("is_error"), bool)
+            else None
+        ),
+        "subtype": (
+            result_event.get("subtype")
+            if isinstance(result_event.get("subtype"), str)
+            else None
+        ),
+    }
+
+
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Stop the process and its descendants on Windows."""
     if process.poll() is not None:
@@ -106,6 +142,8 @@ def run_task(
         "error": None,
     }
 
+    result.update(extract_usage(None))
+
     if command is None:
         result.update(
             status="launch_error",
@@ -119,10 +157,13 @@ def run_task(
     args = [
         command,
         "-p",
-        "--output-format", "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--max-turns", str(max_turns),
-        "--permission-mode", "default",
+        "--max-turns",
+        str(max_turns),
+        "--permission-mode",
+        "default",
         prompt,
     ]
     if model:
@@ -130,8 +171,7 @@ def run_task(
 
     # Keep the prompt out of the recorded command for privacy.
     result["command"] = [
-        part if part != prompt else "<prompt omitted>"
-        for part in args
+        part if part != prompt else "<prompt omitted>" for part in args
     ]
 
     lines: queue.Queue[str | None] = queue.Queue()
@@ -155,9 +195,7 @@ def run_task(
                 bufsize=1,
                 shell=False,
                 creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                    if os.name == "nt"
-                    else 0
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
                 ),
             )
 
@@ -245,9 +283,14 @@ def run_task(
     if reader_error:
         result["reader_error"] = reader_error
 
+    result.update(extract_usage(result.get("claude_result_event")))
+
+
     if timed_out:
         result["status"] = "timed_out"
     elif result["error"]:
+        result["status"] = "failed"
+    elif result.get("is_error") is True:
         result["status"] = "failed"
     elif result["exit_code"] == 0:
         result["status"] = "succeeded"
@@ -255,9 +298,7 @@ def run_task(
         result["status"] = "failed"
 
     result["finished_at"] = utc_now()
-    result["duration_seconds"] = round(
-        time.monotonic() - started_clock, 3
-    )
+    result["duration_seconds"] = round(time.monotonic() - started_clock, 3)
 
     write_json(result_path, result)
     return result
