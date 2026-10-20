@@ -1,6 +1,7 @@
 
 import json
 import sys
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,7 +55,7 @@ def test_rejects_duplicate_run_directory(tmp_path):
 def test_cli_missing_saves_structured_result(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_runner.shutil, "which", lambda _: None)
 
-    task_id = "cli-missing-test"
+    task_id = f"cli-missing-{uuid.uuid4().hex[:10]}"
     result = claude_runner.run_task(
         task_id=task_id,
         prompt="hello",
@@ -85,7 +86,7 @@ def test_launch_exception_saves_failure_result(tmp_path, monkeypatch):
         claude_runner.subprocess, "Popen", fail_to_start
     )
 
-    task_id = "launch-exception-test"
+    task_id = f"launch-exception-{uuid.uuid4().hex[:10]}"
     result = claude_runner.run_task(
         task_id=task_id,
         prompt="hello",

@@ -101,3 +101,89 @@ class GitHubClient:
             raise GitHubAPIError(f"#{number} is not a GitHub Issue.")
 
         return item
+
+
+    def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        """Send an authenticated JSON POST request."""
+        if not self.token:
+            raise GitHubAPIError(
+                "A GITHUB_TOKEN is required for write operations."
+            )
+
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": "agent-lab-orchestrator",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Authorization": f"Bearer {self.token}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout
+            ) as response:
+                response_body = response.read()
+                if not response_body:
+                    return None
+                return json.loads(response_body.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise GitHubAPIError(
+                f"GitHub API returned HTTP {exc.code} for {path}."
+            ) from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise GitHubAPIError(
+                f"GitHub API request failed: {type(exc).__name__}."
+            ) from None
+        except json.JSONDecodeError:
+            raise GitHubAPIError(
+                "GitHub API returned invalid JSON."
+            ) from None
+
+    def add_issue_comment(
+        self,
+        number: int,
+        comment: str,
+    ) -> dict[str, Any]:
+        """Add a comment to an Issue."""
+        if number < 1:
+            raise ValueError("Issue number must be positive.")
+        if not comment.strip():
+            raise ValueError("Comment cannot be empty.")
+
+        result = self._post_json(
+            f"issues/{number}/comments",
+            {"body": comment},
+        )
+        if not isinstance(result, dict):
+            raise GitHubAPIError("Unexpected response when adding comment.")
+        return result
+
+    def add_issue_labels(
+        self,
+        number: int,
+        labels: list[str],
+    ) -> list[dict[str, Any]]:
+        """Add labels without replacing existing labels."""
+        if number < 1:
+            raise ValueError("Issue number must be positive.")
+        if not labels or any(not x.strip() for x in labels):
+            raise ValueError("Provide one or more non-empty labels.")
+
+        result = self._post_json(
+            f"issues/{number}/labels",
+            {"labels": labels},
+        )
+        if not isinstance(result, list):
+            raise GitHubAPIError("Unexpected response when adding labels.")
+        return result
