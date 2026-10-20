@@ -109,6 +109,8 @@ def invoke_runner(
     max_turns: int | None = None,
     keep_result_text: bool = False,
     read_only: bool = False,
+    effort: str | None = None,
+    max_budget_usd: float | None = None,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -135,6 +137,10 @@ def invoke_runner(
         command += ["--max-turns", str(max_turns)]
     if read_only:
         command.append("--read-only")
+    if effort:
+        command += ["--effort", effort]
+    if max_budget_usd is not None:
+        command += ["--max-budget-usd", f"{max_budget_usd:g}"]
 
     try:
         completed = process_runner(

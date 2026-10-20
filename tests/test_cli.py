@@ -260,9 +260,11 @@ def stored_plan_document(run_id="run-ai-9"):
         "summary": "Two steps.",
         "tasks": [
             {"id": "T1", "title": "First", "description": "Do first.", "depends_on": [],
-             "expected_outcome": "First done.", "files": ["a.py"], "verification": ["pytest"]},
+             "expected_outcome": "First done.", "files": ["a.py"], "verification": ["pytest"],
+             "acceptance_criteria": ["First is done."], "complexity": "small", "parallel_safe": False},
             {"id": "T2", "title": "Second", "description": "Do second.", "depends_on": ["T1"],
-             "expected_outcome": "Second done.", "files": [], "verification": []},
+             "expected_outcome": "Second done.", "files": [], "verification": [],
+             "acceptance_criteria": ["Second is done."], "complexity": "large", "parallel_safe": False},
         ],
         "planner": {"run_id": f"{run_id}-plan", "max_turns": 10, "duration_seconds": 8.2,
                     "total_cost_usd": 0.07, "num_turns": 3},
@@ -393,3 +395,14 @@ def test_show_plan_missing(tmp_path, capsys):
 
 def test_show_plan_invalid_run_id_is_refused(tmp_path):
     assert cli.main(["show-plan", "../x", "--plans-dir", str(tmp_path)]) == cli.EXIT_REFUSED
+
+
+def test_show_plan_displays_acceptance_criteria_and_run_profile(tmp_path, capsys):
+    save_task_plan(tmp_path, "run-ai-9", stored_plan_document())
+
+    cli.main(["show-plan", "run-ai-9", "--plans-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "Accept:  First is done." in out
+    assert "Run as:  small, sequential -> sonnet, low effort, 10 turns, 600s, $1 budget" in out
+    assert "Run as:  large, sequential -> opus, high effort, 50 turns, 2400s, $10 budget" in out

@@ -78,6 +78,8 @@ READ_ONLY_FLAGS = (
     "none",  # deny anything that would need approval
 )
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 
 def build_claude_args(
     command: str,
@@ -86,11 +88,20 @@ def build_claude_args(
     max_turns: int,
     model: str | None = None,
     read_only: bool = False,
+    effort: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> list[str]:
     args = [
         command, "-p", "--output-format", "stream-json", "--verbose",
         "--max-turns", str(max_turns), "--permission-mode", "default", prompt,
     ]
+    # Each takes exactly one value, so they are safe in front of the prompt.
+    limits: list[str] = []
+    if effort:
+        limits += ["--effort", effort]
+    if max_budget_usd is not None:
+        limits += ["--max-budget-usd", f"{max_budget_usd:g}"]
+    args[-1:-1] = limits
     if read_only:
         args[2:2] = READ_ONLY_FLAGS
     if model:
@@ -128,6 +139,8 @@ def run_task(
     model: str | None = None,
     max_turns: int = 5,
     read_only: bool = False,
+    effort: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
         raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
@@ -137,6 +150,12 @@ def run_task(
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1.")
+
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ValueError(f"effort must be one of: {', '.join(EFFORT_LEVELS)}.")
+
+    if max_budget_usd is not None and not max_budget_usd > 0:
+        raise ValueError("max_budget_usd must be greater than 0.")
 
     cwd = cwd.resolve()
     if not cwd.is_dir():
@@ -168,6 +187,8 @@ def run_task(
         "model": model,
         "max_turns": max_turns,
         "read_only": read_only,
+        "effort": effort,
+        "max_budget_usd": max_budget_usd,
         "events_file": str(events_path),
         "stderr_file": str(stderr_path),
         "event_count": 0,
@@ -191,7 +212,13 @@ def run_task(
         return result
 
     args = build_claude_args(
-        command, prompt, max_turns=max_turns, model=model, read_only=read_only
+        command,
+        prompt,
+        max_turns=max_turns,
+        model=model,
+        read_only=read_only,
+        effort=effort,
+        max_budget_usd=max_budget_usd,
     )
 
     # Keep the prompt out of the recorded command for privacy.
@@ -347,6 +374,12 @@ def main() -> int:
         action="store_true",
         help="Restrict Claude to Read/Grep/Glob and ignore settings allow rules.",
     )
+    parser.add_argument("--effort", choices=EFFORT_LEVELS)
+    parser.add_argument(
+        "--max-budget-usd",
+        type=float,
+        help="Stop the run once estimated spend reaches this amount.",
+    )
     args = parser.parse_args()
 
     prompt = (
@@ -365,6 +398,8 @@ def main() -> int:
             model=args.model,
             max_turns=args.max_turns,
             read_only=args.read_only,
+            effort=args.effort,
+            max_budget_usd=args.max_budget_usd,
         )
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

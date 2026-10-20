@@ -22,6 +22,9 @@ def task(task_id="T1", **overrides):
         "expected_outcome": "It works.",
         "files": ["src/a.py"],
         "verification": ["python -m pytest"],
+        "acceptance_criteria": ["It works."],
+        "complexity": "small",
+        "parallel_safe": False,
     }
     value.update(overrides)
     return value
@@ -53,13 +56,17 @@ def test_parses_json_surrounded_by_prose_without_fence():
 
 
 def test_optional_fields_default_to_empty():
-    minimal = {"id": "T1", "title": "t", "description": "d", "expected_outcome": "o"}
+    minimal = {
+        "id": "T1", "title": "t", "description": "d", "expected_outcome": "o",
+        "acceptance_criteria": ["c"], "complexity": "medium",
+    }
     parsed = parse_plan_output(json.dumps({"tasks": [minimal]}))
 
     assert parsed["summary"] == ""
     assert parsed["tasks"][0]["depends_on"] == []
     assert parsed["tasks"][0]["files"] == []
     assert parsed["tasks"][0]["verification"] == []
+    assert parsed["tasks"][0]["parallel_safe"] is False
 
 
 def test_unknown_fields_are_dropped():
@@ -67,6 +74,7 @@ def test_unknown_fields_are_dropped():
     assert set(parsed["tasks"][0]) == {
         "id", "title", "description", "depends_on",
         "expected_outcome", "files", "verification",
+        "acceptance_criteria", "complexity", "parallel_safe",
     }
 
 
@@ -179,7 +187,7 @@ def test_save_and_load_round_trip(tmp_path):
     assert path == plan_path(tmp_path, "run-1")
     record = load_task_plan(tmp_path, "run-1")
     assert record["run_id"] == "run-1"
-    assert record["schema_version"] == 1
+    assert record["schema_version"] == 2
     assert record["tasks"][0]["id"] == "T1"
     assert "created_at" in record
 
@@ -223,10 +231,11 @@ def test_load_missing_plan(tmp_path):
     [
         ("{nope", "unreadable or malformed"),
         ("[]", "does not match"),
-        (json.dumps({"run_id": "other", "schema_version": 1}), "does not match"),
+        (json.dumps({"run_id": "other", "schema_version": 2}), "does not match"),
         (json.dumps({"run_id": "run-1", "schema_version": 99}), "schema version"),
+        (json.dumps({"run_id": "run-1", "schema_version": 1}), "generated again"),
         (
-            json.dumps({"run_id": "run-1", "schema_version": 1, "tasks": [task("T1", depends_on=["T2"])]}),
+            json.dumps({"run_id": "run-1", "schema_version": 2, "tasks": [task("T1", depends_on=["T2"])]}),
             "Stored plan is invalid",
         ),
     ],
@@ -237,3 +246,76 @@ def test_corrupt_stored_plans_are_rejected(tmp_path, content, message):
 
     with pytest.raises(RunRegistryError, match=message):
         load_task_plan(tmp_path, "run-1")
+
+
+@pytest.mark.parametrize(
+    "overrides,message",
+    [
+        ({"acceptance_criteria": []}, "at least one acceptance criterion"),
+        ({"acceptance_criteria": None}, "at least one acceptance criterion"),
+        ({"acceptance_criteria": "works"}, "acceptance_criteria"),
+        ({"complexity": "huge"}, "complexity"),
+        ({"complexity": None}, "complexity"),
+        ({"parallel_safe": "yes"}, "parallel_safe"),
+    ],
+)
+def test_new_fields_are_validated(overrides, message):
+    with pytest.raises(PlanValidationError, match=message):
+        validate_tasks([task(**overrides)])
+
+
+def test_complexity_is_normalized():
+    assert validate_tasks([task(complexity=" Medium ")])[0]["complexity"] == "medium"
+
+
+def safe(tasks):
+    return {t["id"]: t["parallel_safe"] for t in validate_tasks(tasks)}
+
+
+def test_independent_tasks_with_different_files_stay_parallel_safe():
+    flags = safe([
+        task("T1", files=["src/a.py"], parallel_safe=True),
+        task("T2", files=["src/b.py"], parallel_safe=True),
+    ])
+    assert flags == {"T1": True, "T2": True}
+
+
+def test_shared_file_downgrades_both_tasks():
+    flags = safe([
+        task("T1", files=["src/a.py"], parallel_safe=True),
+        task("T2", files=["./SRC\\a.py"], parallel_safe=True),  # same file, spelled differently
+    ])
+    assert flags == {"T1": False, "T2": False}
+
+
+def test_parallel_safe_needs_known_files():
+    assert safe([task("T1", files=[], parallel_safe=True)]) == {"T1": False}
+
+
+def test_unknown_files_elsewhere_make_an_unordered_task_unsafe():
+    flags = safe([
+        task("T1", files=["src/a.py"], parallel_safe=True),
+        task("T2", files=[], parallel_safe=False),
+    ])
+    assert flags["T1"] is False
+
+
+def test_ordered_tasks_may_share_files():
+    flags = safe([
+        task("T1", files=["src/a.py"], parallel_safe=True),
+        task("T2", files=["src/a.py"], depends_on=["T1"], parallel_safe=True),
+    ])
+    assert flags == {"T1": True, "T2": True}
+
+
+def test_ordering_through_a_chain_counts():
+    flags = safe([
+        task("T1", files=["src/a.py"], parallel_safe=True),
+        task("T2", files=["src/b.py"], depends_on=["T1"]),
+        task("T3", files=["src/a.py"], depends_on=["T2"], parallel_safe=True),
+    ])
+    assert flags["T1"] is True and flags["T3"] is True
+
+
+def test_downgrade_never_upgrades():
+    assert safe([task("T1", files=["a.py"], parallel_safe=False)]) == {"T1": False}

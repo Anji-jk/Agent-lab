@@ -21,6 +21,7 @@ from orchestrator.planning import (
     ExecutionPlan,
     build_plan,
 )
+from orchestrator.profiles import profile_for
 from orchestrator.run_registry import RunRegistryError
 from orchestrator.task_plan import load_task_plan, plan_path
 from orchestrator.tasks import Task
@@ -201,6 +202,11 @@ def display_task_plan(record: dict, path: Path) -> None:
         print(f"\n  {task['id']}  {task['title']}   (depends on: {depends})")
         print(f"      {task['description']}")
         print(f"      Outcome: {task['expected_outcome']}")
+        for criterion in task["acceptance_criteria"]:
+            print(f"      Accept:  {criterion}")
+        parallel = "parallel-safe" if task["parallel_safe"] else "sequential"
+        print(f"      Run as:  {task['complexity']}, {parallel} -> "
+              f"{profile_for(task['complexity']).describe()}")
         if task["files"]:
             print(f"      Files:   {', '.join(task['files'])}")
         for step in task["verification"]:

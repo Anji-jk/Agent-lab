@@ -20,7 +20,8 @@ from orchestrator.run_registry import (
     write_json_atomic,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+COMPLEXITIES = ("small", "medium", "large")
 PLAN_FILE_NAME = "plan.json"
 
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
@@ -54,6 +55,20 @@ def _string_list(value: object, field: str) -> list[str]:
             f"{field} must be a list of at most {MAX_LIST_ITEMS} items."
         )
     return [_text(item, f"{field} item", limit=MAX_ITEM) for item in value]
+
+
+def _complexity(value: object, field: str) -> str:
+    if not isinstance(value, str) or value.strip().lower() not in COMPLEXITIES:
+        raise PlanValidationError(f"{field} must be one of: {', '.join(COMPLEXITIES)}.")
+    return value.strip().lower()
+
+
+def _flag(value: object, field: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PlanValidationError(f"{field} must be true or false.")
+    return value
 
 
 def _relative_path(value: str) -> str:
@@ -103,6 +118,11 @@ def validate_tasks(raw_tasks: object) -> list[dict[str, Any]]:
                 "verification": _string_list(
                     raw.get("verification"), f"{label} verification"
                 ),
+                "acceptance_criteria": _acceptance_criteria(
+                    raw.get("acceptance_criteria"), label
+                ),
+                "complexity": _complexity(raw.get("complexity"), f"{label} complexity"),
+                "parallel_safe": _flag(raw.get("parallel_safe"), f"{label} parallel_safe"),
             }
         )
 
@@ -124,7 +144,72 @@ def validate_tasks(raw_tasks: object) -> list[dict[str, Any]]:
             raise PlanValidationError(f"Task {task['id']} lists a dependency twice.")
 
     _reject_cycles(tasks)
+    _enforce_parallel_safety(tasks)
     return tasks
+
+
+def _acceptance_criteria(value: object, label: str) -> list[str]:
+    criteria = _string_list(value, f"{label} acceptance_criteria")
+    if not criteria:
+        raise PlanValidationError(f"{label} needs at least one acceptance criterion.")
+    return criteria
+
+
+def _ancestors(tasks: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Every task each task depends on, directly or through others."""
+    direct = {task["id"]: set(task["depends_on"]) for task in tasks}
+    result: dict[str, set[str]] = {}
+
+    def visit(task_id: str) -> set[str]:
+        if task_id not in result:
+            found: set[str] = set()
+            for parent in direct[task_id]:
+                found |= {parent} | visit(parent)
+            result[task_id] = found
+        return result[task_id]
+
+    for task_id in direct:
+        visit(task_id)
+    return result
+
+
+def _normalized_files(task: dict[str, Any]) -> set[str]:
+    return {
+        PurePosixPath(path.replace("\\", "/")).as_posix().lower().removeprefix("./")
+        for path in task["files"]
+    }
+
+
+def _enforce_parallel_safety(tasks: list[dict[str, Any]]) -> None:
+    """The AI's parallel_safe claim is trusted only when it can be checked.
+
+    A task keeps ``parallel_safe`` only if it names its files and shares none
+    with any task it is not ordered against (neither depends on the other).
+    A task that does not list its files makes every unordered task unsafe,
+    because overlap cannot be ruled out. Downgrading only reduces
+    concurrency, so it can never cause a conflict.
+    """
+    ancestors = _ancestors(tasks)
+    files = {task["id"]: _normalized_files(task) for task in tasks}
+    for task in tasks:
+        if not task["parallel_safe"]:
+            continue
+        mine = files[task["id"]]
+        safe = bool(mine)
+        for other in tasks:
+            if not safe:
+                break
+            if other["id"] == task["id"]:
+                continue
+            ordered = (
+                other["id"] in ancestors[task["id"]]
+                or task["id"] in ancestors[other["id"]]
+            )
+            if ordered:
+                continue
+            theirs = files[other["id"]]
+            safe = bool(theirs) and not (mine & theirs)
+        task["parallel_safe"] = safe
 
 
 def _reject_cycles(tasks: list[dict[str, Any]]) -> None:
@@ -221,7 +306,9 @@ def load_task_plan(plans_dir: Path, run_id: str) -> dict[str, Any]:
         raise RunRegistryError(f"Plan file does not match its run ID: {run_id}")
     if record.get("schema_version") != SCHEMA_VERSION:
         raise RunRegistryError(
-            f"Unsupported plan schema version: {record.get('schema_version')!r}"
+            f"Unsupported plan schema version: {record.get('schema_version')!r} "
+            f"(this version reads {SCHEMA_VERSION}; plans from older versions "
+            "must be generated again with ai-plan)."
         )
     try:
         record["tasks"] = validate_tasks(record.get("tasks"))

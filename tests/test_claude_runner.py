@@ -275,3 +275,47 @@ def test_claude_process_gets_the_filtered_env(tmp_path, monkeypatch):
     )
     assert "GITHUB_TOKEN" not in seen["env"]
     assert "PATH" in seen["env"]
+
+
+def test_effort_and_budget_flags_sit_before_the_prompt():
+    args = claude_runner.build_claude_args(
+        "claude", "PROMPT", max_turns=3, effort="high", max_budget_usd=2.5
+    )
+
+    assert args[-1] == "PROMPT"
+    assert args[args.index("--effort") + 1] == "high"
+    assert args[args.index("--max-budget-usd") + 1] == "2.5"
+
+
+def test_effort_and_budget_combine_with_read_only():
+    args = claude_runner.build_claude_args(
+        "claude", "PROMPT", max_turns=3, read_only=True, effort="low", max_budget_usd=1
+    )
+
+    assert args[-1] == "PROMPT"
+    assert args[args.index("--max-budget-usd") + 1] == "1"
+    assert args[args.index("--disallowedTools") + 2].startswith("--")
+
+
+def test_limits_are_omitted_when_unset():
+    args = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3)
+    assert "--effort" not in args and "--max-budget-usd" not in args
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"effort": "extreme"}, "effort must be one of"),
+        ({"max_budget_usd": 0}, "greater than 0"),
+        ({"max_budget_usd": -1}, "greater than 0"),
+    ],
+)
+def test_invalid_limits_are_rejected_before_anything_is_created(tmp_path, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        claude_runner.run_task(
+            task_id=f"limits-{uuid.uuid4().hex[:8]}",
+            prompt="hi",
+            cwd=tmp_path,
+            timeout_seconds=10,
+            **kwargs,
+        )

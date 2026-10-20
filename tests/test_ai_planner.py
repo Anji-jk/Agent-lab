@@ -32,6 +32,9 @@ GOOD_PLAN = {
             "expected_outcome": "Duplicate headers are rejected.",
             "files": ["src/csv_summary.py"],
             "verification": ["python -m pytest"],
+            "acceptance_criteria": ["Duplicate headers are rejected."],
+            "complexity": "small",
+            "parallel_safe": False,
         },
         {
             "id": "T2",
@@ -41,6 +44,9 @@ GOOD_PLAN = {
             "expected_outcome": "Tests cover duplicates.",
             "files": ["tests/test_csv_summary.py"],
             "verification": [],
+            "acceptance_criteria": ["Tests cover duplicates."],
+            "complexity": "small",
+            "parallel_safe": False,
         },
     ],
 }
@@ -477,3 +483,22 @@ def test_missing_base_ref_is_refused(git_repo, plans_dir, runner_script):
     with pytest.raises(PlanningError, match="does not exist"):
         generate(plan, plans_dir, runner_script, planner)
     assert planner.calls == []
+
+
+def test_prompt_asks_for_the_execution_fields(execution_plan):
+    prompt = build_planner_prompt(execution_plan, [], "ctx")
+
+    for field in ("acceptance_criteria", "complexity", "parallel_safe"):
+        assert field in prompt
+    assert "small | medium | large" in prompt
+    assert "When unsure, use false" in prompt
+
+
+def test_plan_missing_acceptance_criteria_is_rejected(execution_plan, plans_dir, runner_script):
+    bad = json.loads(json.dumps(GOOD_PLAN))
+    del bad["tasks"][0]["acceptance_criteria"]
+
+    with pytest.raises(PlanningError, match="acceptance criterion"):
+        generate(execution_plan, plans_dir, runner_script, FakePlanner(text=json.dumps(bad)))
+
+    assert not plan_path(plans_dir, "run-ai-1").exists()

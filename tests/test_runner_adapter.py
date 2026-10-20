@@ -238,6 +238,19 @@ def test_optional_flags_are_omitted(runner_script, tmp_path):
     assert "--model" not in command
     assert "--max-turns" not in command
     assert "--read-only" not in command
+    assert "--effort" not in command and "--max-budget-usd" not in command
+
+
+def test_effort_and_budget_are_passed_to_the_runner(runner_script, tmp_path):
+    runner = fake_process(
+        runner_script, "run-1", result={"status": "succeeded"}, code=0
+    )
+    call(runner_script, tmp_path, runner, effort="medium", max_budget_usd=3.0)
+
+    command, _ = runner.calls[0]
+    pairs = dict(zip(command[2::2], command[3::2]))
+    assert pairs["--effort"] == "medium"
+    assert pairs["--max-budget-usd"] == "3"
 
 
 def test_read_only_is_passed_to_the_runner(runner_script, tmp_path):
