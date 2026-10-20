@@ -15,7 +15,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-RUN_ID_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}")
+from orchestrator.run_registry import validate_run_id
+
 # Conservative subset of valid ref names: no leading '-', no '..', no spaces.
 BASE_REF_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 
@@ -93,12 +94,6 @@ def validate_base_ref(base_ref: str) -> str:
     ):
         raise ValueError(f"Invalid base reference: {base_ref!r}")
     return base_ref
-
-
-def validate_run_id(run_id: object) -> str:
-    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
-        raise ValueError("Invalid run ID.")
-    return run_id
 
 
 def validate_issue_number(issue_number: object) -> int:

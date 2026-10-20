@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agent_env import AGENT_ENV_ALLOWLIST, build_agent_env  # noqa: F401  (re-exported)
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -63,6 +65,38 @@ def extract_usage(result_event: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+# Flags that make a run read-only no matter what the user's or project's
+# settings allow. Inserted right after "-p" so the variadic
+# --disallowedTools value is followed by a flag, never by the prompt.
+READ_ONLY_FLAGS = (
+    "--restricted",  # ignore user/project settings and their allow rules
+    "--tools",
+    "Read,Grep,Glob",  # the only built-in tools that exist in this run
+    "--disallowedTools",
+    "mcp__*",  # --tools does not cover MCP tools
+    "--permission-prompts",
+    "none",  # deny anything that would need approval
+)
+
+
+def build_claude_args(
+    command: str,
+    prompt: str,
+    *,
+    max_turns: int,
+    model: str | None = None,
+    read_only: bool = False,
+) -> list[str]:
+    args = [
+        command, "-p", "--output-format", "stream-json", "--verbose",
+        "--max-turns", str(max_turns), "--permission-mode", "default", prompt,
+    ]
+    if read_only:
+        args[2:2] = READ_ONLY_FLAGS
+    if model:
+        args[1:1] = ["--model", model]
+    return args
+
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Stop the process and its descendants on Windows."""
     if process.poll() is not None:
@@ -93,6 +127,7 @@ def run_task(
     timeout_seconds: int,
     model: str | None = None,
     max_turns: int = 5,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
         raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
@@ -132,6 +167,7 @@ def run_task(
         "timeout_seconds": timeout_seconds,
         "model": model,
         "max_turns": max_turns,
+        "read_only": read_only,
         "events_file": str(events_path),
         "stderr_file": str(stderr_path),
         "event_count": 0,
@@ -154,20 +190,9 @@ def run_task(
         write_json(result_path, result)
         return result
 
-    args = [
-        command,
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--max-turns",
-        str(max_turns),
-        "--permission-mode",
-        "default",
-        prompt,
-    ]
-    if model:
-        args[1:1] = ["--model", model]
+    args = build_claude_args(
+        command, prompt, max_turns=max_turns, model=model, read_only=read_only
+    )
 
     # Keep the prompt out of the recorded command for privacy.
     result["command"] = [
@@ -186,6 +211,7 @@ def run_task(
             process = subprocess.Popen(
                 args,
                 cwd=str(cwd),
+                env=build_agent_env(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=stderr_file,
@@ -316,6 +342,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--model")
     parser.add_argument("--max-turns", type=int, default=5)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Restrict Claude to Read/Grep/Glob and ignore settings allow rules.",
+    )
     args = parser.parse_args()
 
     prompt = (
@@ -333,6 +364,7 @@ def main() -> int:
             timeout_seconds=args.timeout,
             model=args.model,
             max_turns=args.max_turns,
+            read_only=args.read_only,
         )
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

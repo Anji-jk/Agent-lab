@@ -108,6 +108,7 @@ def invoke_runner(
     model: str | None = None,
     max_turns: int | None = None,
     keep_result_text: bool = False,
+    read_only: bool = False,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -132,6 +133,8 @@ def invoke_runner(
         command += ["--model", model]
     if max_turns is not None:
         command += ["--max-turns", str(max_turns)]
+    if read_only:
+        command.append("--read-only")
 
     try:
         completed = process_runner(

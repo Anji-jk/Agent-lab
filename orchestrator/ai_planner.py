@@ -4,13 +4,19 @@ A planning agent (Claude Code, launched through the existing runner) reads
 the Issue and the repository and returns a task-level plan as JSON, which is
 validated and stored as ``<plans_dir>/<run_id>/plan.json``.
 
-Planning is read-only by construction and by verification:
+Planning is meant to be read-only, and the guarantees differ in strength:
 
-* the agent runs in the main checkout with the runner's default permission
-  mode, which grants no edit or shell approvals in headless mode;
-* no branch, worktree, or ``orchestration.json`` is ever created;
-* the repository's Git state is compared before and after, and a plan is
-  discarded (not stored) if anything changed.
+* enforced: the agent is launched with the runner's ``--read-only`` flags
+  (Read/Grep/Glob only, settings allow rules ignored), in the main checkout;
+* enforced: planning itself never creates a branch, worktree, or
+  ``orchestration.json``;
+* required up front: the checkout is clean and at ``base_ref``, so the plan
+  describes exactly the commit execution would start from (recorded as
+  ``base_commit``);
+* tripwire only: Git status, HEAD, branches and worktrees are compared before
+  and after, and the plan is discarded if they differ. This cannot see
+  gitignored files or anything outside the repository, so a clean comparison
+  is evidence, not proof, of read-only behaviour.
 
 The planner's own runner artifacts go to ``runs/<run_id>-plan/``, which is
 distinct from the ``runs/<run_id>/`` directory a later execution will use.
@@ -169,6 +175,26 @@ def _repository_state(root: Path) -> dict[str, str]:
         raise PlanningError("Could not inspect the repository's Git state.") from None
 
 
+def check_planning_base(root: Path, base_ref: str) -> str:
+    """Require a clean checkout at ``base_ref``; return that commit SHA."""
+    state = _repository_state(root)
+    if state["status"]:
+        raise PlanningError(
+            "The checkout has uncommitted or untracked changes. Commit or "
+            "stash them first, so the plan matches what execution starts from."
+        )
+    try:
+        base_commit = run_git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        raise PlanningError(f"Base ref {base_ref!r} does not exist.") from None
+    if state["head"] != base_commit:
+        raise PlanningError(
+            f"The checkout is at {state['head'][:12]}, but {base_ref} is "
+            f"{base_commit[:12]}. Check out {base_ref} before planning."
+        )
+    return base_commit
+
+
 def generate_ai_plan(
     plan: ExecutionPlan,
     *,
@@ -199,6 +225,7 @@ def generate_ai_plan(
 
     task = plan.task
     root = plan.repository_root
+    base_commit = check_planning_base(root, plan.base_ref)
     before = _repository_state(root)
 
     prompt = build_planner_prompt(
@@ -218,6 +245,7 @@ def generate_ai_plan(
             model=plan.model,
             max_turns=plan.max_turns,
             keep_result_text=True,
+            read_only=True,
             runner_script=runner_script,
         )
 
@@ -253,6 +281,7 @@ def generate_ai_plan(
         "config": {
             "repository": task.repository,
             "base_ref": plan.base_ref,
+            "base_commit": base_commit,
             "model": plan.model,
             "timeout_seconds": plan.timeout_seconds,
             "run_id": plan.run_id,

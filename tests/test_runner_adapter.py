@@ -237,12 +237,26 @@ def test_optional_flags_are_omitted(runner_script, tmp_path):
     command, _ = runner.calls[0]
     assert "--model" not in command
     assert "--max-turns" not in command
+    assert "--read-only" not in command
+
+
+def test_read_only_is_passed_to_the_runner(runner_script, tmp_path):
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(runner_script, tmp_path, runner, read_only=True)
+    command, _ = runner.calls[0]
+    assert "--read-only" in command
 
 
 def test_runner_directory_follows_the_runner_script(runner_script):
     assert runner_run_directory("run-1", runner_script) == (
         runner_script.parent.parent / "runs" / "run-1"
     )
+
+
+def copy_real_runner(script):
+    """Copy the runner and the sibling modules it imports."""
+    for name in ("claude_runner.py", "agent_env.py"):
+        shutil.copy(REAL_RUNNER.parent / name, script.parent / name)
 
 
 def test_real_runner_cli_contract_without_claude(tmp_path):
@@ -252,7 +266,7 @@ def test_real_runner_cli_contract_without_claude(tmp_path):
     """
     script = tmp_path / "project" / "scripts" / "claude_runner.py"
     script.parent.mkdir(parents=True)
-    shutil.copy(REAL_RUNNER, script)
+    copy_real_runner(script)
     worktree = tmp_path / "wt"
     worktree.mkdir()
     prompt = tmp_path / "prompt.txt"
@@ -279,7 +293,7 @@ def test_real_runner_cli_contract_without_claude(tmp_path):
 def test_real_runner_rejects_missing_worktree_with_usage_error(tmp_path):
     script = tmp_path / "project" / "scripts" / "claude_runner.py"
     script.parent.mkdir(parents=True)
-    shutil.copy(REAL_RUNNER, script)
+    copy_real_runner(script)
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("hello", encoding="utf-8")
 

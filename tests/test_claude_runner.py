@@ -223,3 +223,55 @@ def test_rejects_invalid_numeric_metadata():
     assert result["output_tokens"] == 10
     assert result["is_error"] is None
     assert result["subtype"] is None
+
+
+def test_read_only_flags_restrict_tools_and_ignore_settings():
+    args = claude_runner.build_claude_args(
+        "claude", "PROMPT", max_turns=3, model="opus", read_only=True
+    )
+    assert args[-1] == "PROMPT"
+    assert args[args.index("--tools") + 1] == "Read,Grep,Glob"
+    assert args[args.index("--disallowedTools") + 1] == "mcp__*"
+    assert args[args.index("--permission-prompts") + 1] == "none"
+    assert "--restricted" in args
+    assert "--allowedTools" not in args  # that flag grants, it never restricts
+    assert args[args.index("--disallowedTools") + 2].startswith("--")
+    assert args[args.index("--model") + 1] == "opus"
+
+
+def test_normal_runs_are_unchanged():
+    args = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3)
+    assert args == [
+        "claude", "-p", "--output-format", "stream-json", "--verbose",
+        "--max-turns", "3", "--permission-mode", "default", "PROMPT",
+    ]
+
+
+def test_agent_env_withholds_secrets():
+    source = {
+        "PATH": "/bin", "Path": "C:\\Windows", "HOME": "/home/me",
+        "ANTHROPIC_API_KEY": "needed-for-auth",
+        "GITHUB_TOKEN": "secret", "GH_TOKEN": "secret",
+        "AWS_SECRET_ACCESS_KEY": "secret", "DATABASE_URL": "secret",
+    }
+    assert claude_runner.build_agent_env(source) == {
+        "PATH": "/bin", "Path": "C:\\Windows", "HOME": "/home/me",
+        "ANTHROPIC_API_KEY": "needed-for-auth",
+    }
+
+
+def test_claude_process_gets_the_filtered_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _: "claude")
+    seen = {}
+
+    def capture(args, **kwargs):
+        seen.update(kwargs)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", capture)
+    claude_runner.run_task(
+        task_id=f"env-{uuid.uuid4().hex[:10]}", prompt="hi", cwd=tmp_path, timeout_seconds=10
+    )
+    assert "GITHUB_TOKEN" not in seen["env"]
+    assert "PATH" in seen["env"]

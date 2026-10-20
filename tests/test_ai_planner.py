@@ -158,6 +158,7 @@ def test_execution_configuration_is_preserved(execution_plan, plans_dir, runner_
     assert record["config"] == {
         "repository": "Anji-jk/Agent-lab",
         "base_ref": "main",
+        "base_commit": git(execution_plan.repository_root, "rev-parse", "HEAD"),
         "model": "claude-test-model",
         "timeout_seconds": 300,
         "run_id": "run-ai-1",
@@ -183,6 +184,7 @@ def test_planner_is_launched_read_only_in_the_main_checkout(
     assert call["timeout_seconds"] == 300
     assert call["max_turns"] == 7
     assert call["keep_result_text"] is True
+    assert call["read_only"] is True
     assert call["runner_script"] == runner_script
 
 
@@ -447,3 +449,31 @@ def test_repository_context_lists_tracked_files_and_truncates(git_repo):
 
 def test_repository_context_survives_git_failure(tmp_path):
     assert "unavailable" in repository_context(tmp_path / "nope")
+
+
+def test_dirty_checkout_is_refused_before_launching(execution_plan, plans_dir, runner_script, git_repo):
+    (git_repo / "scratch.txt").write_text("uncommitted", encoding="utf-8")
+    planner = FakePlanner()
+    with pytest.raises(PlanningError, match="uncommitted or untracked"):
+        generate(execution_plan, plans_dir, runner_script, planner)
+    assert planner.calls == []
+    assert not plan_path(plans_dir, "run-ai-1").exists()
+
+
+def test_checkout_not_at_base_ref_is_refused(execution_plan, plans_dir, runner_script, git_repo):
+    git(git_repo, "checkout", "-b", "feature")
+    (git_repo / "extra.txt").write_text("x", encoding="utf-8")
+    git(git_repo, "add", "extra.txt")
+    git(git_repo, "commit", "-m", "ahead of main")
+    planner = FakePlanner()
+    with pytest.raises(PlanningError, match="Check out main"):
+        generate(execution_plan, plans_dir, runner_script, planner)
+    assert planner.calls == []
+
+
+def test_missing_base_ref_is_refused(git_repo, plans_dir, runner_script):
+    plan = build_plan(make_task(), git_repo, base_ref="does-not-exist", run_id="run-x")
+    planner = FakePlanner()
+    with pytest.raises(PlanningError, match="does not exist"):
+        generate(plan, plans_dir, runner_script, planner)
+    assert planner.calls == []

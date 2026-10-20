@@ -8,10 +8,10 @@ isolated execution, subagents, monitoring, and verification.
 - src/: Python application code
 - tests/: Automated tests
 - data/: Sample input files
-- docs/: Project documentation
-- orchestrator/: Future orchestration implementation
-- .claude/agents/: Custom Claude Code subagents
-- .claude/skills/: Project-specific skills
+- orchestrator/: GitHub-Issue-driven orchestration (planning, execution,
+  run registry, worktrees)
+- scripts/claude_runner.py: Headless Claude Code runner used by the
+  orchestrator
 
 ## Environment
 - Python 3.11+
