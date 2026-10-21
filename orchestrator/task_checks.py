@@ -21,11 +21,6 @@ DEFAULT_TEST_COMMAND = (sys.executable, "-m", "pytest", "-q")
 
 # Files that tools leave behind and that are never part of the work.
 _NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache"})
-STAGING_EXCLUDES = (
-    ":(exclude,glob)**/__pycache__/**",
-    ":(exclude,glob).pytest_cache/**",
-    ":(exclude,glob)**/*.pyc",
-)
 
 OUTPUT_TAIL_CHARS = 3000
 MAX_DIFF_CHARS = 60_000
@@ -39,11 +34,13 @@ class CheckError(RuntimeError):
     """Git or the test run could not be inspected."""
 
 
-def _git(worktree: Path, *args: str, timeout: int = 60) -> str:
+def _git(worktree: Path, *args: str, timeout: int = 60, stdin: str | None = None) -> str:
     """Run git in ``worktree`` and return stdout exactly as printed."""
+    command = next((a for a in args if not a.startswith("-")), "command")
     try:
         completed = subprocess.run(
             ["git", "-C", str(worktree), *args],
+            input=stdin,
             check=True,
             capture_output=True,
             text=True,
@@ -52,12 +49,14 @@ def _git(worktree: Path, *args: str, timeout: int = 60) -> str:
             timeout=timeout,
         )
     except subprocess.CalledProcessError as exc:
-        lines = (exc.stderr or "").strip().splitlines()
+        # Report git's own message, not the "hint:" lines it prints after it.
+        lines = [l for l in (exc.stderr or "").strip().splitlines()
+                 if l.strip() and not l.startswith("hint:")]
         raise CheckError(
-            f"git {args[0]} failed: {lines[-1] if lines else exc.returncode}"
+            f"git {command} failed: {lines[0] if lines else exc.returncode}"
         ) from None
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CheckError(f"git {args[0]} could not run: {type(exc).__name__}") from None
+        raise CheckError(f"git {command} could not run: {type(exc).__name__}") from None
     return completed.stdout
 
 
@@ -203,8 +202,18 @@ def removed_test_lines(
 
 
 def stage_all(worktree: Path) -> None:
-    """Stage everything except tool leftovers. Touches only this worktree's index."""
-    _git(worktree, "add", "-A", "--", ".", *STAGING_EXCLUDES)
+    """Stage exactly the files that changed, and nothing else.
+
+    The list comes from ``changed_paths``, so tool leftovers and ignored
+    files are never in it. Paths are passed on stdin and read literally, so
+    a long list cannot hit the Windows command-line limit and a name such as
+    ``a[1].py`` is not read as a pattern. Touches only this worktree's index.
+    """
+    paths = changed_paths(worktree)
+    if not paths:
+        return
+    _git(worktree, "--literal-pathspecs", "add", "-A",
+         "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(paths))
 
 
 def diff_text(worktree: Path, limit: int = MAX_DIFF_CHARS) -> str:

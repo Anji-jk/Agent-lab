@@ -30,7 +30,8 @@ from orchestrator.task_registry import load_task, save_task, update_task
 from orchestrator.worktrees import create_worktree
 
 TEST_DIRS = (f"{TEST_DIR}/",)
-TEST_TIMEOUT_SECONDS = 600
+# The full suite took 496 s in a worktree outside OneDrive on Windows (M2.8).
+TEST_TIMEOUT_SECONDS = 1200
 CREDENTIAL_VARIABLES = frozenset(
     {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"}
 )

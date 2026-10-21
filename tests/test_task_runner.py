@@ -48,6 +48,8 @@ def world(tmp_path):
     git(repo, "init", "-q", "-b", "main")
     (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
     (repo / "conftest.py").write_text("")
+    # Like the real repository: test runs create folders that .gitignore ignores.
+    (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.py[cod]\n")
     (repo / "README.md").write_text("docs\n")
     (repo / "tests").mkdir()
     (repo / "tests" / "test_add.py").write_text(

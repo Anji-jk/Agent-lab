@@ -145,6 +145,38 @@ def test_diff_and_commit(repo):
     assert log == "Agent Lab Orchestrator|task T1"
 
 
+def test_staging_works_with_ignored_cache_folders_present(repo):
+    # The live M2.8 run failed here: an exclude pattern named a folder that
+    # .gitignore ignores, and git add refused.
+    (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.py[cod]\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore caches")
+    (repo / ".pytest_cache").mkdir()
+    (repo / ".pytest_cache" / "v").write_text("x")
+    (repo / "tests" / "__pycache__").mkdir()
+    (repo / "tests" / "__pycache__" / "t.pyc").write_bytes(b"x")
+    (repo / "app.py").write_text("x = 9\n")
+    assert "+x = 9" in tc.diff_text(repo)
+    tc.commit_all(repo, "with caches around")
+    assert tc.changed_paths(repo) == []
+
+
+def test_staging_takes_odd_names_literally_and_records_deletions(repo):
+    (repo / "a[1].py").write_text("odd = 1\n")
+    (repo / "tests" / "test_app.py").unlink()
+    tc.commit_all(repo, "odd name and a deletion")
+    assert tc.changed_paths(repo) == []
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True,
+                            text=True, check=True).stdout.split()
+    assert "a[1].py" in listed and "tests/test_app.py" not in listed
+
+
+def test_git_errors_report_the_message_not_the_hint(tmp_path):
+    with pytest.raises(tc.CheckError) as error:
+        tc.head_commit(tmp_path)
+    assert "hint:" not in str(error.value) and "rev-parse" in str(error.value)
+
+
 def test_commit_with_nothing_staged_fails(repo):
     with pytest.raises(tc.CheckError):
         tc.commit_all(repo, "empty")
