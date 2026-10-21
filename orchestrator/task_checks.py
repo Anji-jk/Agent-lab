@@ -1,0 +1,367 @@
+"""Facts the orchestrator establishes for itself about a task's worktree.
+
+Nothing here asks an agent. After each agent has run, the orchestrator looks
+at the files and at Git, and runs the tests with its own hands. An agent's
+report ("I only touched the tests", "tests pass") is a claim; these
+functions are the check.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+DELETED = "<deleted>"
+DEFAULT_TEST_COMMAND = (sys.executable, "-m", "pytest", "-q")
+
+# Files that tools leave behind and that are never part of the work.
+_NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache"})
+STAGING_EXCLUDES = (
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob).pytest_cache/**",
+    ":(exclude,glob)**/*.pyc",
+)
+
+OUTPUT_TAIL_CHARS = 3000
+MAX_DIFF_CHARS = 60_000
+
+COMMITTER = ("Agent Lab Orchestrator", "orchestrator@agent-lab.invalid")
+
+_TEST_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(?:::[\w\[\]\-.,:=@ ]+)?")
+
+
+class CheckError(RuntimeError):
+    """Git or the test run could not be inspected."""
+
+
+def _git(worktree: Path, *args: str, timeout: int = 60) -> str:
+    """Run git in ``worktree`` and return stdout exactly as printed."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        lines = (exc.stderr or "").strip().splitlines()
+        raise CheckError(
+            f"git {args[0]} failed: {lines[-1] if lines else exc.returncode}"
+        ) from None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CheckError(f"git {args[0]} could not run: {type(exc).__name__}") from None
+    return completed.stdout
+
+
+# --- what changed ------------------------------------------------------------
+
+
+def head_commit(worktree: Path) -> str:
+    return _git(worktree, "rev-parse", "HEAD").strip()
+
+
+def current_branch(worktree: Path) -> str | None:
+    """The checked-out branch, or None for a detached HEAD."""
+    try:
+        return _git(worktree, "symbolic-ref", "--short", "-q", "HEAD").strip() or None
+    except CheckError:
+        return None
+
+
+def is_noise(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return bool(_NOISE_DIRS & set(parts)) or path.endswith(".pyc")
+
+
+def parse_status(raw: str) -> list[str]:
+    """Paths from ``git status --porcelain=v1 -z``; renames list both names."""
+    parts = raw.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        paths.append(path)
+        if ("R" in status or "C" in status) and index < len(parts):
+            paths.append(parts[index])
+            index += 1
+    return paths
+
+
+def changed_paths(worktree: Path) -> list[str]:
+    """Every file that differs from HEAD (including new files), sorted."""
+    raw = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    return sorted({path for path in parse_status(raw) if not is_noise(path)})
+
+
+def snapshot(worktree: Path) -> dict[str, str]:
+    """Content fingerprint of every changed file, to compare between agents."""
+    result: dict[str, str] = {}
+    for path in changed_paths(worktree):
+        target = Path(worktree) / path
+        try:
+            if target.is_symlink():
+                result[path] = "link:" + os.readlink(target)
+            elif target.is_file():
+                result[path] = hashlib.sha256(target.read_bytes()).hexdigest()
+            else:
+                result[path] = DELETED
+        except OSError:
+            result[path] = DELETED
+    return result
+
+
+def changed_between(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Paths an agent created, edited or removed, given snapshots around it."""
+    paths = {path for path in after if before.get(path) != after[path]}
+    # A file that was changed before and is now back to HEAD vanishes from
+    # `after`; that is a change too.
+    paths |= {path for path in before if path not in after}
+    return sorted(paths)
+
+
+# --- rules about where changes may be ----------------------------------------
+
+
+def _normalize(path: str) -> str:
+    normalized = PurePosixPath(path.replace("\\", "/")).as_posix().removeprefix("./")
+    # An empty path normalizes to "."; keep it empty so "" can mean "anywhere".
+    return "" if normalized == "." else normalized
+
+
+def under(path: str, prefixes: tuple[str, ...] | list[str]) -> bool:
+    """Is ``path`` one of ``prefixes`` or inside one that is a folder?"""
+    path = _normalize(path)
+    for prefix in prefixes:
+        prefix = _normalize(prefix)
+        if not prefix or path == prefix or path.startswith(prefix.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def outside(paths: list[str], prefixes: tuple[str, ...] | list[str]) -> list[str]:
+    return [path for path in paths if not under(path, prefixes)]
+
+
+def scope_violations(
+    paths: list[str], planned_files: list[str], test_dirs: tuple[str, ...]
+) -> list[str]:
+    """Changed files that the plan did not name and that are not tests.
+
+    A plan that names no files gives nothing to compare against, so nothing
+    is reported; the reviewer still sees the whole diff.
+    """
+    if not planned_files:
+        return []
+    return outside(paths, [*planned_files, *test_dirs])
+
+
+_TEST_OR_ASSERT = re.compile(r"^\s*(?:async\s+)?def\s+test|^\s*class\s+Test|^\s*assert\b")
+
+
+def removed_test_lines(
+    worktree: Path, paths: list[str], test_dirs: tuple[str, ...]
+) -> list[str]:
+    """Existing test files that lost a test function, a test class or an assertion.
+
+    Adding tests is expected, and so is touching an import or a helper in an
+    existing test file. Removing or rewriting a test or an ``assert`` is how
+    a change makes a failing suite pass, so only those lines are reported.
+    """
+    candidates = [p for p in paths if under(p, test_dirs)]
+    if not candidates:
+        return []
+    raw = _git(worktree, "-c", "core.quotepath=off", "diff", "HEAD", "-U0",
+               "--no-color", "--no-renames", "--", *candidates)
+    flagged: set[str] = set()
+    current: str | None = None
+    in_hunk = False
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            current, in_hunk = None, False
+        elif not in_hunk and line.startswith("--- a/"):
+            current = line[len("--- a/"):]
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and current and line.startswith("-") and _TEST_OR_ASSERT.match(line[1:]):
+            flagged.add(current)
+    return sorted(flagged)
+
+
+# --- staging, diff and commit --------------------------------------------------
+
+
+def stage_all(worktree: Path) -> None:
+    """Stage everything except tool leftovers. Touches only this worktree's index."""
+    _git(worktree, "add", "-A", "--", ".", *STAGING_EXCLUDES)
+
+
+def diff_text(worktree: Path, limit: int = MAX_DIFF_CHARS) -> str:
+    """The staged change as a patch, cut at ``limit`` characters."""
+    stage_all(worktree)
+    patch = _git(worktree, "diff", "--cached", "HEAD", "--no-color")
+    if len(patch) <= limit:
+        return patch
+    return patch[:limit].rsplit("\n", 1)[0] + "\n... (diff truncated)\n"
+
+
+def commit_all(worktree: Path, message: str) -> str:
+    """Commit the staged change as the orchestrator and return the new SHA.
+
+    ``--no-verify`` keeps repository hooks (code an agent may have been able
+    to influence) from running as part of the orchestrator's own commit.
+    """
+    stage_all(worktree)
+    name, email = COMMITTER
+    _git(
+        worktree,
+        "-c", f"user.name={name}",
+        "-c", f"user.email={email}",
+        "-c", "commit.gpgsign=false",
+        "commit", "--no-verify", "-m", message,
+    )
+    return head_commit(worktree)
+
+
+def commit_exists(repository: Path, commit: str) -> bool:
+    try:
+        _git(repository, "cat-file", "-e", f"{commit}^{{commit}}")
+    except CheckError:
+        return False
+    return True
+
+
+def is_ancestor(repository: Path, older: str, newer: str) -> bool:
+    try:
+        _git(repository, "merge-base", "--is-ancestor", older, newer)
+    except CheckError:
+        return False
+    return True
+
+
+def pick_base_commit(repository: Path, commits: list[str]) -> str | None:
+    """The one commit that already contains all the others, if there is one.
+
+    A task that depends on several finished tasks can start from the last of
+    them only when the others are its ancestors. Combining separate branches
+    needs a merge, which is a later stage's job, so then there is no answer.
+    """
+    unique = list(dict.fromkeys(commits))
+    for candidate in unique:
+        if all(is_ancestor(repository, other, candidate) for other in unique):
+            return candidate
+    return None
+
+
+# --- running commands ------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    command: tuple[str, ...]
+    exit_code: int | None
+    timed_out: bool
+    output_tail: str
+    seconds: float
+
+    @property
+    def passed(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out
+
+    def summary(self) -> dict:
+        return {
+            "command": list(self.command),
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "seconds": round(self.seconds, 2),
+            "output_tail": self.output_tail,
+        }
+
+
+def run_command(
+    command: tuple[str, ...] | list[str],
+    cwd: Path,
+    *,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    """Run a command to completion, keeping only the end of its output."""
+    import time
+
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout if isinstance(exc.stdout, str) else ""
+        return CommandResult(
+            tuple(command), None, True, partial[-OUTPUT_TAIL_CHARS:],
+            time.monotonic() - started,
+        )
+    except OSError as exc:
+        return CommandResult(
+            tuple(command), None, False, f"Could not start: {type(exc).__name__}",
+            time.monotonic() - started,
+        )
+    output = (completed.stdout or "") + (completed.stderr or "")
+    return CommandResult(
+        tuple(command), completed.returncode, False, output[-OUTPUT_TAIL_CHARS:],
+        time.monotonic() - started,
+    )
+
+
+def valid_test_id(test_id: object, test_dirs: tuple[str, ...]) -> bool:
+    """A pytest node ID the tester named, safe to pass to pytest.
+
+    It must be a file inside a test folder (optionally ``::name``), and
+    cannot start with ``-`` (pytest would read it as an option) or climb out
+    of the repository.
+    """
+    if not isinstance(test_id, str) or not _TEST_ID.fullmatch(test_id):
+        return False
+    if test_id.startswith(("-", "/")) or ".." in test_id.split("::")[0].split("/"):
+        return False
+    return under(test_id.split("::")[0], test_dirs)
+
+
+def run_suite(
+    worktree: Path,
+    *,
+    command: tuple[str, ...] = DEFAULT_TEST_COMMAND,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    return run_command(command, worktree, timeout=timeout, env=env)
+
+
+def run_named_tests(
+    worktree: Path,
+    test_ids: list[str],
+    *,
+    command: tuple[str, ...] = DEFAULT_TEST_COMMAND,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    """Run only the tests the tester said cover the criteria."""
+    return run_command([*command, *test_ids], worktree, timeout=timeout, env=env)

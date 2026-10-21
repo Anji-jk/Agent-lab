@@ -346,3 +346,19 @@ def test_role_options_are_omitted_by_default(runner_script, tmp_path):
     command, _ = runner.calls[0]
     for flag in ("--isolated", "--tools", "--allow", "--deny"):
         assert flag not in command
+
+
+def test_agent_env_loads_in_a_fresh_interpreter_without_scripts_on_the_path():
+    """The CLI is not run under pytest, which adds scripts/ to the path."""
+    code = (
+        "import os; os.environ['GITHUB_TOKEN']='secret'; "
+        "from orchestrator.runner_adapter import load_agent_env; "
+        "env = load_agent_env(); "
+        "print('GITHUB_TOKEN' in env, 'PATH' in {k.upper() for k in env})"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], cwd=runner_adapter.PROJECT_ROOT,
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr[-400:]
+    assert done.stdout.split() == ["False", "True"]

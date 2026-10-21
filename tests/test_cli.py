@@ -406,3 +406,94 @@ def test_show_plan_displays_acceptance_criteria_and_run_profile(tmp_path, capsys
     assert "Accept:  First is done." in out
     assert "Run as:  small, sequential -> sonnet, low effort, 10 turns, 600s, $1 budget" in out
     assert "Run as:  large, sequential -> opus, high effort, 50 turns, 2400s, $10 budget" in out
+
+
+# --- run-task and show-task ---------------------------------------------------
+
+
+def task_record(status="done", **extra):
+    return {
+        "run_id": "run-ai-9", "task_id": "T1", "status": status, "title": "First",
+        "base_commit": "a" * 40, "branch": "agent/issue-1-run-ai-9-t1", "worktree_path": "/w",
+        "commit": "b" * 40 if status == "done" else None,
+        "roles": {"builder": "builder: sonnet, low effort, 10 turns, $0.60"},
+        "agents": {"builder": {"outcome": "success", "total_cost_usd": 0.12}},
+        "cost_usd": 0.12,
+        "checks": {"suite": {"exit_code": 0, "timed_out": False, "seconds": 1.5}},
+        "reasons": ["Every check passed."] if status == "done" else ["The full test suite fails."],
+        "history": [{"status": s} for s in ("pending", "building", status)],
+        **extra,
+    }
+
+
+def test_help_lists_task_commands(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "run-task" in out and "show-task" in out and "8 task failed" in out
+
+
+@pytest.mark.parametrize("status, code", [
+    ("done", cli.EXIT_OK), ("failed", cli.EXIT_TASK_FAILED),
+    ("needs_review", cli.EXIT_TASK_NEEDS_REVIEW), ("cancelled", cli.EXIT_TASK_NEEDS_REVIEW),
+])
+def test_run_task_exit_codes_and_output(git_repo, tmp_path, monkeypatch, capsys, status, code):
+    plans = tmp_path / "plans"
+    save_task_plan(plans, "run-ai-9", stored_plan_document())
+    seen = {}
+
+    def fake_run_task(run_id, task_id, **kwargs):
+        seen.update(run_id=run_id, task_id=task_id, **kwargs)
+        return task_record(status)
+
+    monkeypatch.setattr(cli, "run_task", fake_run_task)
+    monkeypatch.setattr(cli, "verify_remote_repository", lambda path, repo: seen.update(verified=repo))
+    argv = ["run-task", "run-ai-9", "T1", "--plans-dir", str(plans), "--runs-dir", str(tmp_path / "r"),
+            "--repo-path", str(git_repo), "--worktree-root", str(tmp_path / "wt")]
+    assert cli.main(argv) == code
+    out = capsys.readouterr().out
+    assert f"Task T1 of run run-ai-9: {status}" in out and "Nothing was pushed or merged." in out
+    assert seen["verified"] == "Anji-jk/Agent-lab" and seen["worktree_root"] == tmp_path / "wt"
+    assert seen["plans_dir"] == plans and seen["repo_path"] == git_repo
+
+
+def test_run_task_refusals_use_the_refusal_code(git_repo, tmp_path, monkeypatch, capsys):
+    from orchestrator.task_runner import TaskNotReady
+
+    plans = tmp_path / "plans"
+    save_task_plan(plans, "run-ai-9", stored_plan_document())
+    monkeypatch.setattr(cli, "verify_remote_repository", lambda path, repo: None)
+
+    def not_ready(*args, **kwargs):
+        raise TaskNotReady("T1 is failed, not done; T2 depends on it.")
+
+    monkeypatch.setattr(cli, "run_task", not_ready)
+    code = cli.main(["run-task", "run-ai-9", "T2", "--plans-dir", str(plans), "--repo-path", str(git_repo)])
+    assert code == cli.EXIT_REFUSED and "depends on it" in capsys.readouterr().err
+
+
+def test_run_task_with_no_plan_is_an_error(git_repo, tmp_path, capsys):
+    code = cli.main(["run-task", "nope", "T1", "--plans-dir", str(tmp_path), "--repo-path", str(git_repo)])
+    assert code == cli.EXIT_ERROR and "No plan found" in capsys.readouterr().err
+
+
+def test_show_task_displays_the_record(tmp_path, capsys):
+    from orchestrator.task_registry import save_task
+
+    save_task(tmp_path, "run-ai-9", "T1", {"title": "First", "base_commit": "a" * 40, "reasons": ["why"]})
+    assert cli.main(["show-task", "run-ai-9", "T1", "--runs-dir", str(tmp_path)]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "Task T1 of run run-ai-9: pending" in out and "why" in out
+
+
+def test_show_task_missing_is_an_error(tmp_path, capsys):
+    assert cli.main(["show-task", "run-ai-9", "T1", "--runs-dir", str(tmp_path)]) == cli.EXIT_ERROR
+
+
+def test_display_task_shows_checks_cost_and_history(capsys):
+    cli.display_task(task_record("failed"))
+    out = capsys.readouterr().out
+    for fragment in ("Full suite:", "passed (exit 0", "spent $0.1200", "Cost (USD):  0.12",
+                     "The full test suite fails.", "pending -> building -> failed"):
+        assert fragment in out
+    assert "Commit:" not in out

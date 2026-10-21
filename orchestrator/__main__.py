@@ -1,4 +1,3 @@
-
 """Command-line entry point for the Agent Lab orchestrator."""
 
 from __future__ import annotations
@@ -23,9 +22,15 @@ from orchestrator.planning import (
 )
 from orchestrator.profiles import profile_for
 from orchestrator.run_registry import RunRegistryError
+from orchestrator.task_registry import load_task
+from orchestrator.task_runner import run_task
 from orchestrator.task_plan import load_task_plan, plan_path
 from orchestrator.tasks import Task
-from orchestrator.worktrees import WorktreeError, verify_remote_repository
+from orchestrator.worktrees import (
+    WorktreeError,
+    default_worktree_root,
+    verify_remote_repository,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "orchestration"
@@ -38,12 +43,15 @@ EXIT_REFUSED = 4  # invalid task, or the Issue prohibits execution
 EXIT_RUN_FAILED = 5
 EXIT_RUN_TIMED_OUT = 6
 EXIT_PLANNING_FAILED = 7  # planner failed, or returned an unusable plan
+EXIT_TASK_FAILED = 8  # a check caught a problem; nothing was committed
+EXIT_TASK_NEEDS_REVIEW = 9  # the task could not be judged; a person must look
 
 EPILOG = """\
 exit codes:
   0 success   1 error   2 usage   3 execution not approved
   4 task invalid or execution prohibited   5 run failed   6 run timed out
   7 AI planning failed or returned an invalid plan
+  8 task failed verification   9 task needs review
 """
 
 
@@ -147,6 +155,30 @@ def build_parser() -> argparse.ArgumentParser:
     show_plan_parser.add_argument(
         "--plans-dir", type=Path, default=DEFAULT_RUNS_DIR
     )
+
+    run_task_parser = subparsers.add_parser(
+        "run-task",
+        help="Build, test and review one planned task; commit it locally if every check passes.",
+    )
+    run_task_parser.add_argument("run_id", help="Run ID the plan was stored under.")
+    run_task_parser.add_argument("task_id", help="Task ID in the plan, e.g. T1.")
+    run_task_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_task_parser.add_argument(
+        "--repo-path", type=Path, default=PROJECT_ROOT,
+        help="Local checkout to create the worktree from.",
+    )
+    run_task_parser.add_argument(
+        "--worktree-root", type=Path, default=None,
+        help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
+    )
+
+    show_task_parser = subparsers.add_parser(
+        "show-task", help="Display a task's record. No GitHub or AI calls."
+    )
+    show_task_parser.add_argument("run_id")
+    show_task_parser.add_argument("task_id")
+    show_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
 
     return parser
 
@@ -278,6 +310,61 @@ def run_show_plan(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def display_task(record: dict) -> None:
+    print(f"Task {record['task_id']} of run {record['run_id']}: {record['status']}")
+    print(f"Title:       {record.get('title', '')}")
+    print(f"Base commit: {record.get('base_commit', '')[:12]}")
+    if record.get("branch"):
+        print(f"Branch:      {record['branch']}")
+        print(f"Worktree:    {record.get('worktree_path')}")
+    if record.get("commit"):
+        print(f"Commit:      {record['commit']}")
+    for name, settings in (record.get("roles") or {}).items():
+        agent = (record.get("agents") or {}).get(name, {})
+        outcome = agent.get("outcome", "not run")
+        cost = agent.get("total_cost_usd")
+        spent = f", spent ${cost:.4f}" if isinstance(cost, (int, float)) else ""
+        print(f"  {settings} -> {outcome}{spent}")
+    if record.get("cost_usd") is not None:
+        print(f"Cost (USD):  {record['cost_usd']}")
+    for label, key in (("Full suite", "suite"), ("Named tests", "named_tests")):
+        check = (record.get("checks") or {}).get(key)
+        if check:
+            verdict = "passed" if check["exit_code"] == 0 and not check["timed_out"] else "FAILED"
+            print(f"{label + ':':<13}{verdict} (exit {check['exit_code']}, {check['seconds']}s)")
+    if record.get("reasons"):
+        print("Because:")
+        for reason in record["reasons"]:
+            print(f"  - {reason}")
+    print("History:     " + " -> ".join(step["status"] for step in record.get("history", [])))
+
+
+def run_run_task(args: argparse.Namespace) -> int:
+    plan = load_task_plan(args.plans_dir, args.run_id)
+    verify_remote_repository(args.repo_path, plan["config"]["repository"])
+    print(
+        f"Running {args.task_id} of run {args.run_id}: builder, tester and reviewer "
+        "agents call Claude and may take a while...",
+        file=sys.stderr,
+    )
+    record = run_task(
+        args.run_id, args.task_id,
+        plans_dir=args.plans_dir, runs_dir=args.runs_dir, repo_path=args.repo_path,
+        worktree_root=args.worktree_root or default_worktree_root(),
+    )
+    display_task(record)
+    print("\nNothing was pushed or merged.")
+    return {
+        "done": EXIT_OK,
+        "failed": EXIT_TASK_FAILED,
+    }.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
+
+
+def run_show_task(args: argparse.Namespace) -> int:
+    display_task(load_task(args.runs_dir, args.run_id, args.task_id))
+    return EXIT_OK
+
+
 def run_execute(args: argparse.Namespace) -> int:
     plan = load_plan(args)
     display_plan(plan)
@@ -331,6 +418,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_ai_plan(args)
         if args.command == "show-plan":
             return run_show_plan(args)
+        if args.command == "run-task":
+            return run_run_task(args)
+        if args.command == "show-task":
+            return run_show_task(args)
     except ApprovalRequired as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_NOT_APPROVED

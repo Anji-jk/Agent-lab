@@ -11,6 +11,7 @@ so neither ends up in orchestrator logs or records.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -68,6 +69,28 @@ def runner_run_directory(
 ) -> Path:
     """Where the runner will write ``run_id``'s artifacts."""
     return Path(runner_script).resolve().parent.parent / "runs" / run_id
+
+
+def load_agent_env(runner_script: Path = DEFAULT_RUNNER_SCRIPT) -> dict[str, str]:
+    """The runner's own filtered environment (allowlisted variables only).
+
+    Taken from the runner itself so that anything the orchestrator runs on an
+    agent's behalf sees exactly what an agent would, never more.
+    """
+    script = Path(runner_script).resolve()
+    spec = importlib.util.spec_from_file_location("_agent_lab_runner_env", script)
+    if spec is None or spec.loader is None:
+        raise ValueError("Cannot load the runner script.")
+    module = importlib.util.module_from_spec(spec)
+    # The runner imports its sibling modules (agent_env) by name, as it does
+    # when run as a script; loading it by path does not add its folder.
+    folder = str(script.parent)
+    sys.path.insert(0, folder)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(folder)
+    return module.build_agent_env()
 
 
 def _launch_error(message: str, exit_code: int | None = None) -> RunnerOutcome:
