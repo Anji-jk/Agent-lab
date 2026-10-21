@@ -188,3 +188,52 @@ def test_verify_remote_repository_without_origin(git_repo):
     git(git_repo, "remote", "remove", "origin")
     with pytest.raises(WorktreeError, match="no 'origin'"):
         verify_remote_repository(git_repo, "Anji-jk/Agent-lab")
+
+
+# --- worktrees outside the repository's folder ------------------------------
+
+
+def test_worktree_root_places_the_worktree_there(git_repo, tmp_path):
+    root = tmp_path / "elsewhere" / "worktrees"
+
+    branch, path = create_worktree(git_repo, 7, "run-a", "main", worktree_root=root)
+
+    assert path.parent == root.resolve()
+    assert path.is_dir() and (path / "README.md").exists()
+    registered = {w.path: w.branch for w in list_worktrees(git_repo)}
+    assert registered[path.resolve()] == branch
+
+
+def test_without_a_worktree_root_the_old_sibling_rule_holds(git_repo):
+    _, path = create_worktree(git_repo, 7, "run-a")
+    assert path.parent == git_repo.resolve().parent
+
+
+def test_worktree_root_inside_the_repository_is_refused(git_repo):
+    with pytest.raises(WorktreeError, match="outside the repository"):
+        create_worktree(git_repo, 7, "run-a", "main", worktree_root=git_repo / "wt")
+    assert not (git_repo / "wt").exists()
+
+
+def test_worktree_root_equal_to_the_repository_is_refused(git_repo):
+    with pytest.raises(WorktreeError, match="outside the repository"):
+        create_worktree(git_repo, 7, "run-a", "main", worktree_root=git_repo)
+
+
+def test_default_root_is_in_the_home_folder_unless_overridden(monkeypatch, tmp_path):
+    monkeypatch.delenv(worktrees.WORKTREE_ROOT_ENV, raising=False)
+    assert worktrees.default_worktree_root().name == "agent-worktrees"
+
+    monkeypatch.setenv(worktrees.WORKTREE_ROOT_ENV, str(tmp_path / "mine"))
+    assert worktrees.default_worktree_root() == tmp_path / "mine"
+
+
+def test_a_commit_can_be_the_base(git_repo, tmp_path):
+    sha = git(git_repo, "rev-parse", "HEAD")
+
+    branch, path = create_worktree(
+        git_repo, 7, "run-a", sha, worktree_root=tmp_path / "wt"
+    )
+
+    assert git(path, "rev-parse", "HEAD") == sha
+    assert git(path, "branch", "--show-current") == branch

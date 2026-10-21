@@ -320,3 +320,29 @@ def test_real_runner_rejects_missing_worktree_with_usage_error(tmp_path):
 
     assert outcome.outcome == "launch_error"
     assert outcome.process_exit_code == 2
+
+
+def test_role_options_are_passed_to_the_runner(runner_script, tmp_path):
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(
+        runner_script, tmp_path, runner,
+        isolated=True, tools="Read,Edit",
+        allowed_tools=["Read", "Bash(git diff:*)"], disallowed_tools=["mcp__*"],
+    )
+
+    command, _ = runner.calls[0]
+    assert "--isolated" in command
+    assert command[command.index("--tools") + 1] == "Read,Edit"
+    allowed = [command[i + 1] for i, part in enumerate(command) if part == "--allow"]
+    assert allowed == ["Read", "Bash(git diff:*)"]
+    denied = [command[i + 1] for i, part in enumerate(command) if part == "--deny"]
+    assert denied == ["mcp__*"]
+
+
+def test_role_options_are_omitted_by_default(runner_script, tmp_path):
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(runner_script, tmp_path, runner)
+
+    command, _ = runner.calls[0]
+    for flag in ("--isolated", "--tools", "--allow", "--deny"):
+        assert flag not in command

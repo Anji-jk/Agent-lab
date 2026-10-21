@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from orchestrator.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER
 from orchestrator.task_plan import COMPLEXITIES
 
 
@@ -42,3 +43,52 @@ def profile_for(complexity: str) -> RunProfile:
         return PROFILES[complexity]
     except KeyError:
         raise ValueError(f"Unknown complexity: {complexity!r}") from None
+
+
+# --- the three agents of one task ------------------------------------------
+# The profile above is the whole task's allowance. Each agent gets a share of
+# it: the builder does most of the work, the tester less, the reviewer reads
+# one diff. These numbers are starting guesses, to be tuned from real runs.
+
+MIN_ROLE_TURNS = 5
+
+# role -> (share of the turn limit, share of the spending cap)
+ROLE_SHARES: dict[str, tuple[float, float]] = {
+    BUILDER: (1.0, 0.60),
+    TESTER: (0.6, 0.25),
+    REVIEWER: (0.4, 0.15),
+}
+
+assert set(ROLE_SHARES) == set(ROLE_NAMES), "every role needs a share"
+
+
+@dataclass(frozen=True, slots=True)
+class RoleSettings:
+    role: str
+    model: str
+    effort: str
+    max_turns: int
+    timeout_seconds: int
+    max_budget_usd: float
+
+    def describe(self) -> str:
+        return (
+            f"{self.role}: {self.model}, {self.effort} effort, "
+            f"{self.max_turns} turns, ${self.max_budget_usd:.2f}"
+        )
+
+
+def role_settings(profile: RunProfile, role: str) -> RoleSettings:
+    """What one agent of a task may use, taken from the task's profile."""
+    try:
+        turn_share, budget_share = ROLE_SHARES[role]
+    except KeyError:
+        raise ValueError(f"Unknown role: {role!r}") from None
+    return RoleSettings(
+        role=role,
+        model=profile.model,
+        effort=profile.effort,
+        max_turns=max(MIN_ROLE_TURNS, round(profile.max_turns * turn_share)),
+        timeout_seconds=profile.timeout_seconds,
+        max_budget_usd=round(profile.max_budget_usd * budget_share, 4),
+    )

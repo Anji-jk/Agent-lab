@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -111,6 +111,10 @@ def invoke_runner(
     read_only: bool = False,
     effort: str | None = None,
     max_budget_usd: float | None = None,
+    isolated: bool = False,
+    tools: str | None = None,
+    allowed_tools: Sequence[str] = (),
+    disallowed_tools: Sequence[str] = (),
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -141,6 +145,14 @@ def invoke_runner(
         command += ["--effort", effort]
     if max_budget_usd is not None:
         command += ["--max-budget-usd", f"{max_budget_usd:g}"]
+    if isolated:
+        command.append("--isolated")
+    if tools:
+        command += ["--tools", tools]
+    for rule in allowed_tools:
+        command += ["--allow", rule]
+    for rule in disallowed_tools:
+        command += ["--deny", rule]
 
     try:
         completed = process_runner(

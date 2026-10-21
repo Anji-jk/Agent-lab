@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,51 @@ READ_ONLY_FLAGS = (
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
+def validate_tool_patterns(patterns: Sequence[str], label: str) -> list[str]:
+    """Tool names and permission rules, e.g. ``Edit`` or ``Bash(git diff:*)``.
+
+    A pattern starting with ``-`` would be read by Claude Code as another
+    flag, so it is refused here rather than passed on.
+    """
+    checked: list[str] = []
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ValueError(f"{label} entries must be non-empty text.")
+        if pattern.startswith("-"):
+            raise ValueError(f"{label} entries must not start with '-': {pattern!r}")
+        checked.append(pattern)
+    return checked
+
+
+def role_flags(
+    isolated: bool,
+    tools: str | None,
+    allowed_tools: Sequence[str],
+    disallowed_tools: Sequence[str],
+) -> list[str]:
+    """Permission flags for a working agent (builder, tester).
+
+    ``--tools`` decides which built-in tools exist; ``--allowedTools``
+    pre-approves some uses of them; ``--disallowedTools`` removes others.
+    ``--restricted`` makes your own settings irrelevant and
+    ``--permission-prompts none`` denies whatever is not pre-approved, since
+    nobody is there to answer a prompt. The two variadic flags are always
+    followed by another flag, never by the prompt.
+    """
+    flags: list[str] = []
+    if isolated:
+        flags.append("--restricted")
+    if tools:
+        flags += ["--tools", tools]
+    if allowed_tools:
+        flags += ["--allowedTools", *allowed_tools]
+    if disallowed_tools:
+        flags += ["--disallowedTools", *disallowed_tools]
+    if isolated:
+        flags += ["--permission-prompts", "none"]
+    return flags
+
+
 def build_claude_args(
     command: str,
     prompt: str,
@@ -90,6 +136,10 @@ def build_claude_args(
     read_only: bool = False,
     effort: str | None = None,
     max_budget_usd: float | None = None,
+    isolated: bool = False,
+    tools: str | None = None,
+    allowed_tools: Sequence[str] = (),
+    disallowed_tools: Sequence[str] = (),
 ) -> list[str]:
     args = [
         command, "-p", "--output-format", "stream-json", "--verbose",
@@ -104,6 +154,8 @@ def build_claude_args(
     args[-1:-1] = limits
     if read_only:
         args[2:2] = READ_ONLY_FLAGS
+    else:
+        args[2:2] = role_flags(isolated, tools, allowed_tools, disallowed_tools)
     if model:
         args[1:1] = ["--model", model]
     return args
@@ -141,6 +193,10 @@ def run_task(
     read_only: bool = False,
     effort: str | None = None,
     max_budget_usd: float | None = None,
+    isolated: bool = False,
+    tools: str | None = None,
+    allowed_tools: Sequence[str] = (),
+    disallowed_tools: Sequence[str] = (),
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
         raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
@@ -156,6 +212,13 @@ def run_task(
 
     if max_budget_usd is not None and not max_budget_usd > 0:
         raise ValueError("max_budget_usd must be greater than 0.")
+
+    allowed_tools = validate_tool_patterns(allowed_tools, "allowed_tools")
+    disallowed_tools = validate_tool_patterns(disallowed_tools, "disallowed_tools")
+    if tools is not None:
+        validate_tool_patterns(tools.split(","), "tools")
+    if read_only and (isolated or tools or allowed_tools or disallowed_tools):
+        raise ValueError("read_only cannot be combined with custom tool settings.")
 
     cwd = cwd.resolve()
     if not cwd.is_dir():
@@ -189,6 +252,10 @@ def run_task(
         "read_only": read_only,
         "effort": effort,
         "max_budget_usd": max_budget_usd,
+        "isolated": isolated,
+        "tools": tools,
+        "allowed_tools": list(allowed_tools),
+        "disallowed_tools": list(disallowed_tools),
         "events_file": str(events_path),
         "stderr_file": str(stderr_path),
         "event_count": 0,
@@ -219,6 +286,10 @@ def run_task(
         read_only=read_only,
         effort=effort,
         max_budget_usd=max_budget_usd,
+        isolated=isolated,
+        tools=tools,
+        allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
     )
 
     # Keep the prompt out of the recorded command for privacy.
@@ -380,6 +451,20 @@ def main() -> int:
         type=float,
         help="Stop the run once estimated spend reaches this amount.",
     )
+    parser.add_argument(
+        "--isolated",
+        action="store_true",
+        help="Ignore your settings and deny anything not pre-approved.",
+    )
+    parser.add_argument("--tools", help="Comma-separated built-in tools that exist.")
+    parser.add_argument(
+        "--allow", action="append", default=[], metavar="RULE",
+        help="Pre-approve a tool or rule such as 'Bash(git diff:*)' (repeatable).",
+    )
+    parser.add_argument(
+        "--deny", action="append", default=[], metavar="RULE",
+        help="Remove a tool or rule (repeatable).",
+    )
     args = parser.parse_args()
 
     prompt = (
@@ -400,6 +485,10 @@ def main() -> int:
             read_only=args.read_only,
             effort=args.effort,
             max_budget_usd=args.max_budget_usd,
+            isolated=args.isolated,
+            tools=args.tools,
+            allowed_tools=args.allow,
+            disallowed_tools=args.deny,
         )
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

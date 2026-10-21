@@ -502,3 +502,19 @@ def test_plan_missing_acceptance_criteria_is_rejected(execution_plan, plans_dir,
         generate(execution_plan, plans_dir, runner_script, FakePlanner(text=json.dumps(bad)))
 
     assert not plan_path(plans_dir, "run-ai-1").exists()
+
+
+def test_the_issue_text_is_stored_for_the_reviewer(execution_plan, plans_dir, runner_script):
+    record = generate(execution_plan, plans_dir, runner_script, FakePlanner())
+
+    assert record["issue"]["description"] == execution_plan.task.description
+    assert "Acceptance criteria" in record["issue"]["description"]
+
+
+def test_a_long_issue_text_is_stored_whole(git_repo, plans_dir, runner_script):
+    body = "Acceptance criteria\n" + "x" * 30_000 + "\nLAST LINE"
+    plan = build_plan(make_task(body=body), git_repo, run_id="run-ai-2")
+
+    record = generate(plan, plans_dir, runner_script, FakePlanner())
+
+    assert record["issue"]["description"] == body

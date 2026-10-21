@@ -319,3 +319,87 @@ def test_invalid_limits_are_rejected_before_anything_is_created(tmp_path, kwargs
             timeout_seconds=10,
             **kwargs,
         )
+
+
+# --- agent roles: tool and permission flags -------------------------------
+
+
+ROLE = dict(
+    isolated=True,
+    tools="Read,Edit,Bash",
+    allowed_tools=["Read", "Bash(python -m pytest:*)"],
+    disallowed_tools=["mcp__*", "Bash(git commit:*)"],
+)
+
+
+def test_role_flags_sit_before_the_prompt_and_after_p():
+    args = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3, **ROLE)
+
+    assert args[:2] == ["claude", "-p"]
+    assert args[-1] == "PROMPT"
+    assert args[2] == "--restricted"
+    assert args[args.index("--tools") + 1] == "Read,Edit,Bash"
+    assert args[args.index("--permission-prompts") + 1] == "none"
+
+
+def test_variadic_flags_are_always_followed_by_a_flag():
+    args = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3, **ROLE)
+
+    for flag in ("--allowedTools", "--disallowedTools"):
+        values = []
+        for part in args[args.index(flag) + 1 :]:
+            if part.startswith("--"):
+                break
+            values.append(part)
+        assert values  # at least one rule
+        assert "PROMPT" not in values  # the prompt is never swallowed
+
+
+def test_role_rules_are_passed_whole():
+    args = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3, **ROLE)
+
+    allowed = args[args.index("--allowedTools") + 1 : args.index("--disallowedTools")]
+    assert allowed == ["Read", "Bash(python -m pytest:*)"]
+    denied = args[args.index("--disallowedTools") + 1 : args.index("--permission-prompts")]
+    assert denied == ["mcp__*", "Bash(git commit:*)"]
+
+
+def test_role_flags_combine_with_model_effort_and_budget():
+    args = claude_runner.build_claude_args(
+        "claude", "PROMPT", max_turns=3, model="sonnet", effort="low",
+        max_budget_usd=0.5, **ROLE,
+    )
+
+    assert args[:3] == ["claude", "--model", "sonnet"]
+    assert args[-1] == "PROMPT"
+    assert args[args.index("--effort") + 1] == "low"
+    assert args[args.index("--max-budget-usd") + 1] == "0.5"
+
+
+def test_runs_without_role_options_are_unchanged():
+    plain = claude_runner.build_claude_args("claude", "PROMPT", max_turns=3)
+
+    assert "--restricted" not in plain
+    assert "--allowedTools" not in plain and "--tools" not in plain
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"allowed_tools": ["--dangerously-skip-permissions"]}, "must not start with '-'"),
+        ({"disallowed_tools": ["-x"]}, "must not start with '-'"),
+        ({"tools": "Read,--x"}, "must not start with '-'"),
+        ({"allowed_tools": [" "]}, "non-empty"),
+        ({"read_only": True, "isolated": True}, "cannot be combined"),
+        ({"read_only": True, "tools": "Read"}, "cannot be combined"),
+    ],
+)
+def test_bad_role_options_are_rejected_before_anything_is_created(tmp_path, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        claude_runner.run_task(
+            task_id=f"role-{uuid.uuid4().hex[:8]}",
+            prompt="hi",
+            cwd=tmp_path,
+            timeout_seconds=10,
+            **kwargs,
+        )

@@ -4,19 +4,17 @@ A planning agent (Claude Code, launched through the existing runner) reads
 the Issue and the repository and returns a task-level plan as JSON, which is
 validated and stored as ``<plans_dir>/<run_id>/plan.json``.
 
-Planning is meant to be read-only, and the guarantees differ in strength:
+Planning is read-only by construction, with a tripwire behind it:
 
-* enforced: the agent is launched with the runner's ``--read-only`` flags
-  (Read/Grep/Glob only, settings allow rules ignored), in the main checkout;
-* enforced: planning itself never creates a branch, worktree, or
-  ``orchestration.json``;
-* required up front: the checkout is clean and at ``base_ref``, so the plan
-  describes exactly the commit execution would start from (recorded as
-  ``base_commit``);
-* tripwire only: Git status, HEAD, branches and worktrees are compared before
-  and after, and the plan is discarded if they differ. This cannot see
-  gitignored files or anything outside the repository, so a clean comparison
-  is evidence, not proof, of read-only behaviour.
+* the runner launches the agent with ``--read-only``: only Read, Grep and
+  Glob exist, MCP tools are removed, user/project settings (and their allow
+  rules) are ignored, and anything needing approval is denied;
+* the checkout must be clean and at ``base_ref``, so the agent reads the
+  same code an execution will start from; that commit is recorded;
+* no branch, worktree, or ``orchestration.json`` is ever created;
+* tracked/untracked Git state is compared before and after, and a plan is
+  discarded if it changed. This tripwire cannot see gitignored files or
+  anything outside the repository; the tool restriction is the real guard.
 
 The planner's own runner artifacts go to ``runs/<run_id>-plan/``, which is
 distinct from the ``runs/<run_id>/`` directory a later execution will use.
@@ -289,6 +287,9 @@ def generate_ai_plan(
             "number": task.issue_number,
             "title": task.title,
             "url": task.issue_url,
+            # Stored whole, so the builder, tester and reviewer can be given what
+            # the Issue actually asked for, not only the planner's reading of it.
+            "description": task.description,
         },
         "config": {
             "repository": task.repository,

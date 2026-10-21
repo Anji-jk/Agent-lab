@@ -1,6 +1,7 @@
 import pytest
 
-from orchestrator.profiles import PROFILES, profile_for
+from orchestrator.profiles import PROFILES, ROLE_SHARES, profile_for, role_settings
+from orchestrator.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER
 from orchestrator.task_plan import COMPLEXITIES
 
 
@@ -30,3 +31,52 @@ def test_describe_is_human_readable():
 def test_unknown_complexity():
     with pytest.raises(ValueError, match="Unknown complexity"):
         profile_for("gigantic")
+
+
+# --- the three agents of one task ---------------------------------------------
+
+
+def test_budget_shares_add_up_to_the_task_budget():
+    assert sum(budget for _, budget in ROLE_SHARES.values()) == pytest.approx(1.0)
+    for profile in PROFILES.values():
+        total = sum(role_settings(profile, name).max_budget_usd for name in ROLE_NAMES)
+        assert total == pytest.approx(profile.max_budget_usd, rel=1e-3)
+
+
+def test_every_agent_uses_the_tasks_model_and_effort():
+    profile = profile_for("large")
+    for name in ROLE_NAMES:
+        settings = role_settings(profile, name)
+        assert (settings.model, settings.effort) == (profile.model, profile.effort)
+        assert settings.timeout_seconds == profile.timeout_seconds
+
+
+def test_builder_gets_the_most_and_reviewer_the_least():
+    for profile in PROFILES.values():
+        builder, tester, reviewer = (role_settings(profile, n) for n in (BUILDER, TESTER, REVIEWER))
+        assert builder.max_turns >= tester.max_turns >= reviewer.max_turns
+        assert builder.max_budget_usd > tester.max_budget_usd > reviewer.max_budget_usd
+
+
+def test_no_agent_gets_fewer_than_the_minimum_turns():
+    settings = role_settings(profile_for("small"), REVIEWER)
+    assert settings.max_turns == 5
+
+
+def test_small_task_numbers():
+    profile = profile_for("small")
+    assert role_settings(profile, BUILDER).max_turns == 10
+    assert role_settings(profile, BUILDER).max_budget_usd == 0.6
+    assert role_settings(profile, TESTER).max_turns == 6
+    assert role_settings(profile, REVIEWER).max_budget_usd == 0.15
+
+
+def test_role_settings_describe():
+    assert role_settings(profile_for("medium"), TESTER).describe() == (
+        "tester: sonnet, medium effort, 15 turns, $0.75"
+    )
+
+
+def test_unknown_role_in_settings():
+    with pytest.raises(ValueError, match="Unknown role"):
+        role_settings(profile_for("small"), "janitor")

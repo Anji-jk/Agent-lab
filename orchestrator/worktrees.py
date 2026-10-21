@@ -10,6 +10,7 @@ Safety rules enforced here:
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -106,17 +107,37 @@ def validate_issue_number(issue_number: object) -> int:
     return issue_number
 
 
+WORKTREE_ROOT_ENV = "AGENT_LAB_WORKTREE_ROOT"
+
+
+def default_worktree_root() -> Path:
+    """Where task worktrees live: outside the repository and, for most
+    people, outside OneDrive, whose sync client slows Git down and can
+    lock files. Override with ``AGENT_LAB_WORKTREE_ROOT``."""
+    configured = os.environ.get(WORKTREE_ROOT_ENV)
+    return Path(configured) if configured else Path.home() / "agent-worktrees"
+
+
 def plan_worktree(
     repository_root: Path,
     issue_number: int,
     run_id: str,
+    worktree_root: Path | None = None,
 ) -> tuple[Path, str, Path]:
-    """Return ``(root, branch, worktree_path)`` without changing anything."""
+    """Return ``(root, branch, worktree_path)`` without changing anything.
+
+    Without ``worktree_root`` the worktree is a sibling of the repository.
+    """
     validate_issue_number(issue_number)
     validate_run_id(run_id)
     root = resolve_repository_root(repository_root)
     branch = f"agent/issue-{issue_number}-{run_id}"
-    worktree_path = root.parent / f"{root.name}-{branch.replace('/', '-')}"
+    parent = root.parent
+    if worktree_root is not None:
+        parent = Path(worktree_root).expanduser().resolve()
+        if parent == root or root in parent.parents:
+            raise WorktreeError("The worktree folder must be outside the repository.")
+    worktree_path = parent / f"{root.name}-{branch.replace('/', '-')}"
     return root, branch, worktree_path
 
 
@@ -155,6 +176,7 @@ def create_worktree(
     issue_number: int,
     run_id: str,
     base_ref: str = "main",
+    worktree_root: Path | None = None,
 ) -> tuple[str, Path]:
     """Create a unique branch and worktree for one run.
 
@@ -164,7 +186,7 @@ def create_worktree(
     """
     validate_base_ref(base_ref)
     root, branch, worktree_path = plan_worktree(
-        repository_root, issue_number, run_id
+        repository_root, issue_number, run_id, worktree_root
     )
 
     if worktree_path.exists():
@@ -184,6 +206,9 @@ def create_worktree(
     _git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
 
     try:
+        if worktree_root is not None:
+            # Created only now, after every check has passed.
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
         run_git(
             root,
             "worktree",

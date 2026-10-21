@@ -135,6 +135,9 @@ def _locked(run_dir: Path, timeout: float = 10.0) -> Generator[None]:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+locked = _locked  # for modules that keep their own records beside a run's
+
+
 def _parse_timestamp(value: object, field: str) -> None:
     if not isinstance(value, str):
         raise RunRegistryError(f"Record field {field!r} must be a timestamp.")
