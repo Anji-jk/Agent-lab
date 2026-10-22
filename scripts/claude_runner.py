@@ -19,6 +19,19 @@ from typing import Any
 from agent_env import AGENT_ENV_ALLOWLIST, build_agent_env  # noqa: F401  (re-exported)
 
 
+# Where agent run folders go. Normally runs/ in the project; the variable lets the
+# test suite send them to a temporary folder instead (tests/conftest.py). The
+# orchestrator reads the same variable (runner_adapter), so both always agree.
+RUNS_DIR_VARIABLE = "AGENT_LAB_AGENT_RUNS_DIR"
+
+
+def runs_root() -> Path:
+    override = os.environ.get(RUNS_DIR_VARIABLE)
+    if override:
+        return Path(override).resolve()
+    return Path(__file__).resolve().parent.parent / "runs"
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -428,8 +441,7 @@ def run_task(
     if not cwd.is_dir():
         raise NotADirectoryError(f"Working directory does not exist: {cwd}")
 
-    project_root = Path(__file__).resolve().parent.parent
-    run_dir = project_root / "runs" / task_id
+    run_dir = runs_root() / task_id
     run_dir.mkdir(parents=True, exist_ok=False)
 
     events_path = run_dir / "events.jsonl"

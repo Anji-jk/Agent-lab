@@ -127,7 +127,7 @@ def test_bad_role_is_refused_before_anything_is_created(tmp_path):
     with pytest.raises(ValueError, match="role"):
         claude_runner.run_task(task_id=task_id, prompt="x", cwd=tmp_path, timeout_seconds=5,
                                role="Not A Role!")
-    assert not (ROOT / "runs" / task_id).exists()
+    assert not (claude_runner.runs_root() / task_id).exists()
 
 
 # --- a whole run with a stand-in for Claude ----------------------------------------------
@@ -182,7 +182,7 @@ def test_progress_can_be_read_while_the_agent_is_still_working(tmp_path, fake_cl
     monkeypatch.setattr(claude_runner, "HEARTBEAT_SECONDS", 0.3)
     fake_claude["seconds"] = 2.5
     task_id = f"progress-{uuid.uuid4().hex[:8]}"
-    path = ROOT / "runs" / task_id / "progress.json"
+    path = claude_runner.runs_root() / task_id / "progress.json"
     done = {}
     runner = threading.Thread(target=lambda: done.update(result=claude_runner.run_task(
         task_id=task_id, prompt="x", cwd=tmp_path, timeout_seconds=60, role="builder")))

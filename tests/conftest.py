@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.execution.runner_adapter import RUNS_DIR_VARIABLE
+
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
@@ -30,3 +32,16 @@ def git_repo(tmp_path: Path) -> Path:
     git(repo, "commit", "-m", "initial")
     git(repo, "remote", "add", "origin", "https://github.com/Anji-jk/Agent-lab.git")
     return repo
+
+
+@pytest.fixture(autouse=True)
+def agent_runs_dir(tmp_path_factory, monkeypatch):
+    """Agent run folders made by a test go to its own temporary folder, not runs/.
+
+    The runner and the orchestrator both read RUNS_DIR_VARIABLE, so setting it here
+    covers runs started in the test's process and runner processes it starts. One
+    folder per test, so tests that reuse a run ID cannot collide.
+    """
+    folder = tmp_path_factory.mktemp("agent-runs")
+    monkeypatch.setenv(RUNS_DIR_VARIABLE, str(folder))
+    return folder

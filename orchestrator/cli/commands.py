@@ -23,6 +23,7 @@ from orchestrator.cli.display import (
     event_lines,
 )
 from orchestrator.errors import ApprovalRequired, ExecutionRefused
+from orchestrator.execution.background import start_task_in_background
 from orchestrator.legacy.executor import execute_plan
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.legacy.planning import (
@@ -187,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--worktree-root", type=Path, default=None,
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
     )
+    run_task_parser.add_argument(
+        "--background", action="store_true",
+        help="Start the task as its own process and return at once; watch it with "
+             "status or dashboard. It keeps running if this window closes.",
+    )
 
     status_parser = subparsers.add_parser(
         "status",
@@ -293,6 +299,8 @@ def run_show_plan(args: argparse.Namespace) -> int:
 def run_run_task(args: argparse.Namespace) -> int:
     plan = load_task_plan(args.plans_dir, args.run_id)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
+    if args.background:
+        return run_task_in_background(args)
     print(
         f"Running {args.task_id} of run {args.run_id}: builder, tester and reviewer "
         "agents call Claude and may take a while...",
@@ -309,6 +317,23 @@ def run_run_task(args: argparse.Namespace) -> int:
         "done": EXIT_OK,
         "failed": EXIT_TASK_FAILED,
     }.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
+
+
+def run_task_in_background(args: argparse.Namespace) -> int:
+    started = start_task_in_background(
+        args.run_id, args.task_id,
+        plans_dir=args.plans_dir, runs_dir=args.runs_dir, repo_path=args.repo_path,
+        worktree_root=args.worktree_root or default_worktree_root(),
+    )
+    print(f"Started {args.task_id} of run {args.run_id} in the background (process {started.pid}).")
+    if not started.record_seen:
+        print("It has not written its task record yet; if status does not show it soon, "
+              "read the log.")
+    print(f"Log:    {started.log}")
+    print(f"Watch:  python -m orchestrator status {args.run_id} --watch 2")
+    print(f"        python -m orchestrator dashboard {args.run_id}")
+    print("It keeps running if you close this window. Nothing will be pushed or merged.")
+    return EXIT_OK
 
 
 def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:

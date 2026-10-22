@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.execution.runner_adapter import RUNS_DIR_VARIABLE
+
 import orchestrator.cli.commands as cli
 from orchestrator.monitoring import progress as pg
 from orchestrator.records.task_registry import save_task, update_task
@@ -27,11 +29,12 @@ def progress(state="running", ago=2, **extra):
 
 
 @pytest.fixture
-def layout(tmp_path):
+def layout(tmp_path, monkeypatch):
     """A runs dir for task records and a fake runner script whose runs/ holds progress."""
     script = tmp_path / "lab" / "scripts" / "claude_runner.py"
     script.parent.mkdir(parents=True)
     script.write_text("")
+    monkeypatch.setenv(RUNS_DIR_VARIABLE, str(tmp_path / "lab" / "runs"))  # where agents' files are
     return {"runs": tmp_path / "records", "script": script, "agents": tmp_path / "lab" / "runs"}
 
 

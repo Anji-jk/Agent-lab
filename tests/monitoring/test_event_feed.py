@@ -174,6 +174,23 @@ def test_a_run_that_woke_up_again_reads_as_it_happened(tmp_path):
     assert suite.result["summary"].startswith("still running, moved to the background")
 
 
+def test_an_ordinary_command_ending_is_not_called_a_background_command(tmp_path):
+    # Seen on Windows (M3.6): Claude sends task_started and task_notification for every
+    # Bash command, including ones that finished in the foreground.
+    stream = [
+        {"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "python -m pytest tests/a.py -q"}}]}},
+        {"type": "system", "subtype": "task_started", "task_id": "fg1", "tool_use_id": "t1", "is_backgrounded": False},
+        {"type": "system", "subtype": "task_notification", "task_id": "fg1", "status": "completed",
+         "summary": "python -m pytest tests/a.py -q"},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "13 passed in 1.52s"}]}},
+    ]
+    items = ef.agent_items(write_stream(tmp_path / "fg", stream))
+    assert [(i.kind, i.tool) for i in items] == [("tool", "Bash")]
+    assert items[0].result["summary"] == "13 passed in 1.52s"
+
+
 def test_claudes_own_timestamps_are_used(tmp_path):
     items = ef.agent_items(write_stream(tmp_path / "real", REAL_SHAPES, times=False))
     assert items[1].at == "2026-10-22T10:07:24.899Z"

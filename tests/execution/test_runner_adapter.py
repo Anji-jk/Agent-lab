@@ -260,10 +260,21 @@ def test_read_only_is_passed_to_the_runner(runner_script, tmp_path):
     assert "--read-only" in command
 
 
-def test_runner_directory_follows_the_runner_script(runner_script):
+def test_runner_directory_follows_the_runner_script(runner_script, monkeypatch):
+    monkeypatch.delenv(runner_adapter.RUNS_DIR_VARIABLE, raising=False)  # the default
     assert runner_run_directory("run-1", runner_script) == (
         runner_script.parent.parent / "runs" / "run-1"
     )
+
+
+def test_the_runs_folder_variable_moves_the_runner_directory(runner_script, tmp_path, monkeypatch):
+    monkeypatch.setenv(runner_adapter.RUNS_DIR_VARIABLE, str(tmp_path / "elsewhere"))
+    assert runner_run_directory("run-1", runner_script) == (tmp_path / "elsewhere" / "run-1").resolve()
+
+
+def test_runner_and_orchestrator_read_the_same_variable():
+    from scripts import claude_runner
+    assert claude_runner.RUNS_DIR_VARIABLE == runner_adapter.RUNS_DIR_VARIABLE
 
 
 def copy_real_runner(script):
@@ -272,11 +283,12 @@ def copy_real_runner(script):
         shutil.copy(REAL_RUNNER.parent / name, script.parent / name)
 
 
-def test_real_runner_cli_contract_without_claude(tmp_path):
+def test_real_runner_cli_contract_without_claude(tmp_path, monkeypatch):
     """Drive the real scripts/claude_runner.py with Claude hidden from PATH.
 
     The runner is copied into tmp_path so its runs/ directory is isolated.
     """
+    monkeypatch.delenv(runner_adapter.RUNS_DIR_VARIABLE, raising=False)  # the default
     script = tmp_path / "project" / "scripts" / "claude_runner.py"
     script.parent.mkdir(parents=True)
     copy_real_runner(script)

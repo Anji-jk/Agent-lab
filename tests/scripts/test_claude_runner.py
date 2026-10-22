@@ -34,7 +34,7 @@ def test_rejects_missing_working_directory(tmp_path):
 
 
 def test_rejects_duplicate_run_directory(tmp_path):
-    run_dir = ROOT / "runs" / "duplicate-test"
+    run_dir = claude_runner.runs_root() / "duplicate-test"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -67,7 +67,7 @@ def test_cli_missing_saves_structured_result(tmp_path, monkeypatch):
     assert result["exit_code"] is None
 
     saved = json.loads(
-        (ROOT / "runs" / task_id / "result.json").read_text(
+        (claude_runner.runs_root() / task_id / "result.json").read_text(
             encoding="utf-8"
         )
     )
@@ -96,7 +96,7 @@ def test_launch_exception_saves_failure_result(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert "simulated launch failure" in result["error"]
-    assert (ROOT / "runs" / task_id / "result.json").exists()
+    assert (claude_runner.runs_root() / task_id / "result.json").exists()
 
 
 import os
@@ -155,7 +155,7 @@ def test_timeout_terminates_process_and_saves_result(tmp_path, monkeypatch):
     assert elapsed < 15
 
     saved = json.loads(
-        (ROOT / "runs" / task_id / "result.json").read_text(
+        (claude_runner.runs_root() / task_id / "result.json").read_text(
             encoding="utf-8"
         )
     )

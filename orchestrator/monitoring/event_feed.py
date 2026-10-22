@@ -45,8 +45,8 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(\s*[=:]\s*)(['\"]?)([^\s'\"]{6,})"
 )
 # System events that repeat what other events already show, or carry nothing readable.
-_QUIET_SYSTEM = frozenset({"thinking_tokens", "permission_denied", "task_started", "task_updated",
-                           "background_tasks_changed", "status", "hook_started", "hook_response"})
+_QUIET_SYSTEM = frozenset({"thinking_tokens", "permission_denied", "background_tasks_changed",
+                           "status", "hook_started", "hook_response"})
 _BACKGROUNDED = re.compile(r"(?i)moved to the background")
 _BLOCKED = re.compile(
     r"(?i)permission|not allowed|denied|requires approval|was blocked|haven't granted"
@@ -305,6 +305,9 @@ def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]
         return item
 
     started = False
+    # Claude reports every command it runs as a "task", and sends a notification when
+    # each one ends. Only the ones it moved to the background are worth a line.
+    backgrounded: set[str] = set()
     for number, event in _json_lines(events_path):
         # Claude stamps its assistant and user events; the runner's times file covers the rest.
         stamp = event.get("timestamp")
@@ -329,8 +332,14 @@ def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]
                          else "session woke up again")
                 add("start", title, detail=detail, at=at)
                 started = True
+            elif subtype in ("task_started", "task_updated"):
+                patch = _dict(event.get("patch")) if subtype == "task_updated" else event
+                if patch.get("is_backgrounded") is True and event.get("task_id"):
+                    backgrounded.add(str(event["task_id"]))
             elif subtype == "task_notification":
                 # A command Claude had moved to the background has ended; this wakes the session.
+                if str(event.get("task_id")) not in backgrounded:
+                    continue  # an ordinary command; its result is already shown
                 status = str(event.get("status") or "finished")
                 add("step", f"background command {status}: {_one_line(str(event.get('summary') or ''))}",
                     detail=json.dumps(event, ensure_ascii=False, indent=2), at=at,
@@ -386,6 +395,9 @@ def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]
                     status = "blocked" if _BLOCKED.search(text) else "error"
                 elif _BACKGROUNDED.search(text[:300]) or _dict(event.get("tool_use_result")).get("backgroundTaskId"):
                     status = "background"
+                    task_id = _dict(event.get("tool_use_result")).get("backgroundTaskId")
+                    if task_id:
+                        backgrounded.add(str(task_id))
                 owner = tools.get(str(block.get("tool_use_id")))
                 result = {"status": status, "detail": text, "at": at,
                           "summary": trim.in_text(_result_summary(owner.tool if owner else None, text, status))}

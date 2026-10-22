@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from orchestrator.execution.runner_adapter import RUNS_DIR_VARIABLE
+
 import orchestrator.cli.commands as cli
 from orchestrator.monitoring import dashboard as dash
 from orchestrator.records.task_events import task_events_path
@@ -26,13 +28,14 @@ def jsonl(path, rows):
 
 
 @pytest.fixture
-def lab(tmp_path):
+def lab(tmp_path, monkeypatch):
     """A run with a plan, T1 being tested, T2 waiting for T1, and event files for both sides."""
     plans = runs = tmp_path / "orchestration"
     script = tmp_path / "lab" / "scripts" / "claude_runner.py"
     script.parent.mkdir(parents=True)
     script.write_text("")
     agents = tmp_path / "lab" / "runs"
+    monkeypatch.setenv(RUNS_DIR_VARIABLE, str(agents))  # where the agents' files are
     save_task_plan(plans, RUN, {
         "issue": {"repository": "o/r", "number": 3, "title": "Show stats", "description": "x",
                   "url": "https://github.com/o/r/issues/3"},

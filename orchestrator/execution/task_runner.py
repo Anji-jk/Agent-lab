@@ -15,6 +15,7 @@ task's own branch in the task's own worktree. Nothing is pushed or merged.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -368,8 +369,10 @@ def run_task(
         "depends_on": task["depends_on"],
         "base_commit": ctx.base_commit,
         "roles": {name: s.describe() for name, s in ctx.settings.items()},
+        # The process running this pipeline, for cancel and for spotting one that died.
+        "pid": os.getpid(),
     })
-    log.emit("task_started", base_commit=ctx.base_commit, title=task["title"])
+    log.emit("task_started", base_commit=ctx.base_commit, title=task["title"], pid=os.getpid())
 
     try:
         branch, worktree = create_worktree(

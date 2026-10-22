@@ -12,6 +12,7 @@ so neither ends up in orchestrator logs or records.
 from __future__ import annotations
 
 import importlib.util
+import os
 import json
 import subprocess
 import sys
@@ -64,11 +65,19 @@ class RunnerOutcome:
     result: dict[str, Any] = field(default_factory=dict)
 
 
+# Must match scripts/claude_runner.py, which reads the same variable. The runner
+# inherits this process's environment, so when it is set both sides use it.
+RUNS_DIR_VARIABLE = "AGENT_LAB_AGENT_RUNS_DIR"
+
+
 def runner_run_directory(
     run_id: str,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
 ) -> Path:
     """Where the runner will write ``run_id``'s artifacts."""
+    override = os.environ.get(RUNS_DIR_VARIABLE)
+    if override:
+        return Path(override).resolve() / run_id
     return Path(runner_script).resolve().parent.parent / "runs" / run_id
 
 
