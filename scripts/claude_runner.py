@@ -30,29 +30,68 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
-def extract_usage(result_event: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize usage metadata from Claude's result event."""
+# Claude can answer more than once in one run: when a command it started is moved to
+# the background (Bash gives up waiting after 120 s), Claude ends its turn, and the
+# command finishing wakes the session for another turn with its own "result" event.
+# Each result's total_cost_usd and modelUsage are running totals for the session, but
+# its num_turns and usage cover only that last part. Seen on Windows, M3.2.
+_MODEL_USAGE_FIELDS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+}
+
+
+def _number_or_none(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _token_totals(results: list[dict[str, Any]]) -> dict[str, int | float | None]:
+    last = results[-1] if results else {}
+    model_usage = last.get("modelUsage")
+    if isinstance(model_usage, dict) and model_usage:
+        # Running totals per model: add the models up.
+        totals: dict[str, int | float | None] = {}
+        for field, key in _MODEL_USAGE_FIELDS.items():
+            values = [_number_or_none(m.get(key)) for m in model_usage.values() if isinstance(m, dict)]
+            numbers = [v for v in values if v is not None]
+            totals[field] = sum(numbers) if numbers else None
+        if any(v is not None for v in totals.values()):
+            return totals
+    # No running totals: each result's usage covers its own part, so add them up.
+    totals = {}
+    for field in _MODEL_USAGE_FIELDS:
+        numbers = [
+            n for n in (_number_or_none((r.get("usage") or {}).get(field)) for r in results
+                        if isinstance(r.get("usage"), dict))
+            if n is not None
+        ]
+        totals[field] = sum(numbers) if numbers else None
+    return totals
+
+
+def extract_usage(
+    result_event: dict[str, Any] | None,
+    all_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Normalize usage metadata from Claude's result event(s).
+
+    ``result_event`` is the last result; ``all_results`` every result of the run,
+    in order. Turns and tokens are totals for the whole run; cost is the last
+    result's, which is already a running total.
+    """
     if not isinstance(result_event, dict):
         result_event = {}
-
-    usage = result_event.get("usage")
-    if not isinstance(usage, dict):
-        usage = {}
-
-    def number_or_none(value: Any) -> int | float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return value
+    results = [r for r in (all_results or [result_event]) if isinstance(r, dict) and r]
+    turns = [n for n in (_number_or_none(r.get("num_turns")) for r in results) if n is not None]
 
     return {
-        "total_cost_usd": number_or_none(result_event.get("total_cost_usd")),
-        "input_tokens": number_or_none(usage.get("input_tokens")),
-        "output_tokens": number_or_none(usage.get("output_tokens")),
-        "cache_read_input_tokens": number_or_none(usage.get("cache_read_input_tokens")),
-        "cache_creation_input_tokens": number_or_none(
-            usage.get("cache_creation_input_tokens")
-        ),
-        "num_turns": number_or_none(result_event.get("num_turns")),
+        "total_cost_usd": _number_or_none(result_event.get("total_cost_usd")),
+        **_token_totals(results),
+        "num_turns": sum(turns) if turns else None,
         "is_error": (
             result_event.get("is_error")
             if isinstance(result_event.get("is_error"), bool)
@@ -74,6 +113,7 @@ def extract_usage(result_event: dict[str, Any] | None) -> dict[str, Any]:
 # (heartbeat stopped). Writing it is best effort and never stops a run.
 
 PROGRESS_FILE_NAME = "progress.json"
+EVENT_TIMES_FILE_NAME = "event_times.txt"
 HEARTBEAT_SECONDS = 5.0
 MIN_WRITE_SECONDS = 0.5
 TOKEN_FIELDS = (
@@ -393,6 +433,9 @@ def run_task(
     run_dir.mkdir(parents=True, exist_ok=False)
 
     events_path = run_dir / "events.jsonl"
+    # One UTC time per line of events.jsonl, in the same order: Claude's events carry
+    # no timestamps, and the raw stream is kept exactly as Claude sent it.
+    times_path = run_dir / EVENT_TIMES_FILE_NAME
     stderr_path = run_dir / "stderr.log"
     result_path = run_dir / "result.json"
     progress = ProgressTracker(run_dir / PROGRESS_FILE_NAME, task_id=task_id, role=role)
@@ -424,6 +467,7 @@ def run_task(
         "disallowed_tools": list(disallowed_tools),
         "role": role,
         "events_file": str(events_path),
+        "event_times_file": str(times_path),
         "stderr_file": str(stderr_path),
         "progress_file": str(progress.path),
         "event_count": 0,
@@ -435,6 +479,7 @@ def run_task(
     }
 
     result.update(extract_usage(None))
+    result_events: list[dict[str, Any]] = []
 
     if command is None:
         result.update(
@@ -517,7 +562,7 @@ def run_task(
             stdout_finished = False
             with events_path.open(
                 "w", encoding="utf-8", errors="replace"
-            ) as events_file:
+            ) as events_file, times_path.open("w", encoding="utf-8") as times_file:
                 while not stdout_finished:
                     elapsed = time.monotonic() - started_clock
                     remaining = timeout_seconds - elapsed
@@ -541,6 +586,8 @@ def run_task(
                     # Preserve the original stream for later debugging.
                     events_file.write(line)
                     events_file.flush()
+                    times_file.write(utc_now() + "\n")
+                    times_file.flush()
 
                     try:
                         event = json.loads(line)
@@ -563,6 +610,7 @@ def run_task(
                     progress.write()
 
                     if event_type == "result":
+                        result_events.append(event)
                         result["claude_result_event"] = event
                         result["result_text"] = event.get("result")
 
@@ -583,7 +631,8 @@ def run_task(
     if reader_error:
         result["reader_error"] = reader_error
 
-    result.update(extract_usage(result.get("claude_result_event")))
+    result.update(extract_usage(result.get("claude_result_event"), result_events))
+    result["result_count"] = len(result_events)  # more than 1: the session woke up again
 
 
     if timed_out:

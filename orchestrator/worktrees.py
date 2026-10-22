@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchestrator.run_registry import validate_run_id
+from .records.run_registry import validate_run_id
 
 # Conservative subset of valid ref names: no leading '-', no '..', no spaces.
 BASE_REF_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")

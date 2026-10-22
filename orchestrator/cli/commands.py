@@ -1,0 +1,480 @@
+
+"""Command-line entry point for the Agent Lab orchestrator."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from collections.abc import Sequence
+from pathlib import Path
+
+from orchestrator.planning.ai_planner import (
+    DEFAULT_PLANNING_MAX_TURNS,
+    PlanningError,
+    generate_ai_plan,
+)
+from orchestrator.cli.display import (
+    display_issue,
+    display_plan,
+    display_task,
+    display_task_plan,
+    event_lines,
+)
+from orchestrator.errors import ApprovalRequired, ExecutionRefused
+from orchestrator.legacy.executor import execute_plan
+from orchestrator.github.client import GitHubAPIError, GitHubClient
+from orchestrator.legacy.planning import (
+    DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_SECONDS,
+    ExecutionPlan,
+    build_plan,
+)
+from orchestrator.monitoring.progress import format_status, planner_view, run_status, stale_agents
+from orchestrator.monitoring import dashboard as dash
+from orchestrator.monitoring.event_feed import stable_index
+from orchestrator.records.run_registry import RunRegistryError
+from orchestrator.records.task_registry import load_task
+from orchestrator.execution.task_runner import run_task
+from orchestrator.planning.plan_file import load_task_plan, plan_path
+from orchestrator.github.issue import Task
+from orchestrator.execution.worktrees import (
+    WorktreeError,
+    default_worktree_root,
+    verify_remote_repository,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "orchestration"
+
+EVENTS_POLL_SECONDS = 1.0
+
+EXIT_OK = 0
+EXIT_ERROR = 1  # GitHub, Git, or registry failure
+EXIT_USAGE = 2  # argparse
+EXIT_NOT_APPROVED = 3
+EXIT_REFUSED = 4  # invalid task, or the Issue prohibits execution
+EXIT_RUN_FAILED = 5
+EXIT_RUN_TIMED_OUT = 6
+EXIT_PLANNING_FAILED = 7  # planner failed, or returned an unusable plan
+EXIT_TASK_FAILED = 8  # a check caught a problem; nothing was committed
+EXIT_TASK_NEEDS_REVIEW = 9  # the task could not be judged; a person must look
+
+EPILOG = """\
+exit codes:
+  0 success   1 error   2 usage   3 execution not approved
+  4 task invalid or execution prohibited   5 run failed   6 run timed out
+  7 AI planning failed or returned an invalid plan
+  8 task failed verification   9 task needs review
+"""
+
+
+def _add_plan_options(
+    parser: argparse.ArgumentParser,
+    max_turns_default: int = DEFAULT_MAX_TURNS,
+) -> None:
+    parser.add_argument("number", type=int, help="GitHub Issue number.")
+    parser.add_argument(
+        "--repo",
+        default="Anji-jk/Agent-lab",
+        help="GitHub repository in OWNER/REPO format.",
+    )
+    parser.add_argument(
+        "--repo-path",
+        type=Path,
+        default=PROJECT_ROOT,
+        help="Local checkout to create the worktree from.",
+    )
+    parser.add_argument("--base", default="main", help="Base ref for the branch.")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help="Runner timeout in seconds.",
+    )
+    parser.add_argument("--model", help="Claude model to use.")
+    parser.add_argument(
+        "--max-turns", type=int, default=max_turns_default, help="Max agent turns."
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Use this run ID (default: generate one). Fixes the branch name.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m orchestrator",
+        description="GitHub-driven Claude Code agent orchestration.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    issue_parser = subparsers.add_parser(
+        "issue",
+        help="Fetch and display a GitHub Issue without modifying anything.",
+    )
+    issue_parser.add_argument(
+        "number",
+        type=int,
+        help="GitHub Issue number.",
+    )
+    issue_parser.add_argument(
+        "--repo",
+        default="Anji-jk/Agent-lab",
+        help="GitHub repository in OWNER/REPO format.",
+    )
+
+    plan_parser = subparsers.add_parser(
+        "plan",
+        help="Show what executing an Issue would do. Creates nothing.",
+    )
+    _add_plan_options(plan_parser)
+
+    execute_parser = subparsers.add_parser(
+        "execute",
+        help="Run Claude on an Issue in an isolated worktree (needs --approve).",
+    )
+    _add_plan_options(execute_parser)
+    execute_parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Explicitly approve execution. Without it nothing is created.",
+    )
+    execute_parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help="Where orchestration run records are stored.",
+    )
+
+    ai_plan_parser = subparsers.add_parser(
+        "ai-plan",
+        help="Have a read-only AI agent break an Issue into tasks. Executes nothing.",
+    )
+    _add_plan_options(ai_plan_parser, DEFAULT_PLANNING_MAX_TURNS)
+    ai_plan_parser.add_argument(
+        "--plans-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help="Where plans are stored (<plans-dir>/<run-id>/plan.json).",
+    )
+
+    show_plan_parser = subparsers.add_parser(
+        "show-plan",
+        help="Display a stored AI plan. No GitHub or AI calls.",
+    )
+    show_plan_parser.add_argument("run_id", help="Run ID the plan was stored under.")
+    show_plan_parser.add_argument(
+        "--plans-dir", type=Path, default=DEFAULT_RUNS_DIR
+    )
+
+    run_task_parser = subparsers.add_parser(
+        "run-task",
+        help="Build, test and review one planned task; commit it locally if every check passes.",
+    )
+    run_task_parser.add_argument("run_id", help="Run ID the plan was stored under.")
+    run_task_parser.add_argument("task_id", help="Task ID in the plan, e.g. T1.")
+    run_task_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_task_parser.add_argument(
+        "--repo-path", type=Path, default=PROJECT_ROOT,
+        help="Local checkout to create the worktree from.",
+    )
+    run_task_parser.add_argument(
+        "--worktree-root", type=Path, default=None,
+        help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
+    )
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show every task of a run and what its agents are doing now. Reads files only.",
+    )
+    status_parser.add_argument("run_id")
+    status_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    status_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    status_parser.add_argument(
+        "--watch", type=float, metavar="SECONDS",
+        help="Refresh every SECONDS until nothing is running (Ctrl+C to stop).",
+    )
+
+    events_parser = subparsers.add_parser(
+        "events",
+        help="Print what an agent (or the orchestrator) did, step by step. Reads files only.",
+    )
+    events_parser.add_argument("run_id")
+    events_parser.add_argument("task_id", help="A task ID such as T1, or 'plan' for the planner.")
+    events_parser.add_argument(
+        "--role", choices=(*dash.TABS,), default="orchestrator",
+        help="Whose events to show for a task (default: orchestrator).",
+    )
+    events_parser.add_argument("--follow", action="store_true",
+                               help="Keep printing new events until the agent finishes.")
+    events_parser.add_argument("--details", action="store_true",
+                               help="Also print each event's input and result (shortened).")
+    events_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    events_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Open a local web page showing every task and agent of a run. Reads files only.",
+    )
+    dashboard_parser.add_argument("run_id", nargs="?", help="Run to open first (default: the newest).")
+    dashboard_parser.add_argument("--port", type=int, default=dash.DEFAULT_PORT)
+    dashboard_parser.add_argument("--no-browser", action="store_true",
+                                  help="Print the address without opening a browser.")
+    dashboard_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    dashboard_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
+    show_task_parser = subparsers.add_parser(
+        "show-task", help="Display a task's record. No GitHub or AI calls."
+    )
+    show_task_parser.add_argument("run_id")
+    show_task_parser.add_argument("task_id")
+    show_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
+    return parser
+
+
+def load_plan(args: argparse.Namespace) -> ExecutionPlan:
+    """Fetch the Issue (read-only) and build a plan. Creates nothing."""
+    client = GitHubClient(repository=args.repo)
+    task = Task.from_issue(args.repo, client.get_issue(args.number))
+    verify_remote_repository(args.repo_path, args.repo)
+    return build_plan(
+        task,
+        args.repo_path,
+        base_ref=args.base,
+        timeout_seconds=args.timeout,
+        model=args.model,
+        max_turns=args.max_turns,
+        run_id=args.run_id,
+    )
+
+
+def run_plan(args: argparse.Namespace) -> int:
+    plan = load_plan(args)
+    display_plan(plan)
+    if not plan.executable:
+        return EXIT_REFUSED
+    print(
+        f"\nNothing was executed. To run it:\n"
+        f"  python -m orchestrator execute {args.number} "
+        f"--run-id {plan.run_id} --approve"
+    )
+    return EXIT_OK
+
+
+def run_ai_plan(args: argparse.Namespace) -> int:
+    plan = load_plan(args)
+    if not plan.executable:
+        display_plan(plan)
+        return EXIT_REFUSED
+
+    print(
+        f"Planning Issue #{plan.task.issue_number} with a read-only AI agent "
+        f"(run {plan.run_id}). This calls Claude and may take a while...",
+        file=sys.stderr,
+    )
+    record = generate_ai_plan(plan, plans_dir=args.plans_dir)
+    display_task_plan(record, plan_path(args.plans_dir, plan.run_id))
+    print("\nNothing was executed. No branch, worktree, or run record was created.")
+    return EXIT_OK
+
+
+def run_show_plan(args: argparse.Namespace) -> int:
+    record = load_task_plan(args.plans_dir, args.run_id)
+    display_task_plan(record, plan_path(args.plans_dir, args.run_id))
+    return EXIT_OK
+
+
+def run_run_task(args: argparse.Namespace) -> int:
+    plan = load_task_plan(args.plans_dir, args.run_id)
+    verify_remote_repository(args.repo_path, plan["config"]["repository"])
+    print(
+        f"Running {args.task_id} of run {args.run_id}: builder, tester and reviewer "
+        "agents call Claude and may take a while...",
+        file=sys.stderr,
+    )
+    record = run_task(
+        args.run_id, args.task_id,
+        plans_dir=args.plans_dir, runs_dir=args.runs_dir, repo_path=args.repo_path,
+        worktree_root=args.worktree_root or default_worktree_root(),
+    )
+    display_task(record)
+    print("\nNothing was pushed or merged.")
+    return {
+        "done": EXIT_OK,
+        "failed": EXIT_TASK_FAILED,
+    }.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
+
+
+def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
+    """Print the run's status once; True while any task is still in progress."""
+    tasks = run_status(runs_dir, run_id)
+    planner = planner_view(run_id)
+    if not tasks and planner is None and not plan_path(plans_dir, run_id).exists():
+        raise RunRegistryError(f"No plan or tasks found for run {run_id}.")
+    print(format_status(run_id, tasks, planner))
+    stale = stale_agents(tasks)
+    if stale:
+        print(f"\nWarning: no heartbeat from {', '.join(stale)}. Its process may have stopped.")
+    return any(task.active_role for task in tasks)
+
+
+def run_status_command(args: argparse.Namespace) -> int:
+    if not args.watch:
+        _print_status(args.run_id, args.runs_dir, args.plans_dir)
+        return EXIT_OK
+    if args.watch < 1:
+        raise ValueError("--watch must be at least 1 second.")
+    try:
+        while True:
+            os.system("cls" if os.name == "nt" else "clear")
+            print(time.strftime("%H:%M:%S"), "(Ctrl+C to stop)\n")
+            if not _print_status(args.run_id, args.runs_dir, args.plans_dir):
+                print("\nNothing is running any more.")
+                return EXIT_OK
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        return EXIT_OK
+
+
+def run_events(args: argparse.Namespace) -> int:
+    data = dash.DashboardData(args.runs_dir, args.plans_dir)
+    source = ["planner"] if args.task_id == "plan" else [args.task_id, args.role]
+    printed = 0
+    try:
+        while True:
+            items = data.items(args.run_id, source)
+            # While following, print an item only once it can no longer change.
+            stable = items if not args.follow else items[: stable_index(items)]
+            for item in stable[printed:]:
+                for line in event_lines(item.to_dict(), args.details):
+                    print(line)
+            printed = max(printed, len(stable))
+            if not args.follow:
+                if not items:
+                    print("No events recorded for this source yet.")
+                return EXIT_OK
+            if not data.source_live(args.run_id, source) and printed >= len(items):
+                print("-- finished --")
+                return EXIT_OK
+            time.sleep(EVENTS_POLL_SECONDS)
+    except KeyboardInterrupt:
+        return EXIT_OK
+
+
+def run_dashboard(args: argparse.Namespace) -> int:
+    data = dash.DashboardData(args.runs_dir, args.plans_dir)
+    try:
+        server = dash.make_server(data, port=args.port)
+    except OSError as exc:
+        print(f"Error: could not listen on port {args.port} ({exc}). Try --port {args.port + 1}.",
+              file=sys.stderr)
+        return EXIT_ERROR
+    url = f"http://127.0.0.1:{server.server_address[1]}/" + (f"#{args.run_id}" if args.run_id else "")
+    print(f"Dashboard: {url}")
+    print("Reads files only; reachable from this computer only. Ctrl+C to stop.")
+    if not args.no_browser:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return EXIT_OK
+
+
+def run_show_task(args: argparse.Namespace) -> int:
+    display_task(load_task(args.runs_dir, args.run_id, args.task_id))
+    return EXIT_OK
+
+
+def run_execute(args: argparse.Namespace) -> int:
+    plan = load_plan(args)
+    display_plan(plan)
+
+    # execute_plan enforces this too; refusing here keeps it out of the way.
+    if not plan.executable:
+        return EXIT_REFUSED
+
+    if not args.approve:
+        print(
+            "\nNot approved: nothing was created or executed. "
+            "Re-run with --approve to execute this plan.",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_APPROVED
+
+    record = execute_plan(plan, approved=args.approve, runs_dir=args.runs_dir)
+
+    print(f"\nRun {record['run_id']}: {record['status']}")
+    print(f"Branch:      {record['branch']}")
+    print(f"Worktree:    {record['worktree_path']}")
+    if record.get("error"):
+        print(f"Error:       {record['error']}")
+    result = record.get("runner_result") or {}
+    for label, key in (("Duration", "duration_seconds"), ("Cost (USD)", "total_cost_usd")):
+        if result.get(key) is not None:
+            print(f"{label + ':':<13}{result[key]}")
+    print(f"Record:      {args.runs_dir / record['run_id'] / 'orchestration.json'}")
+
+    return {
+        "succeeded": EXIT_OK,
+        "timed_out": EXIT_RUN_TIMED_OUT,
+    }.get(record["status"], EXIT_RUN_FAILED)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "issue":
+            client = GitHubClient(repository=args.repo)
+            issue = client.get_issue(args.number)
+            display_issue(issue)
+            return EXIT_OK
+        if args.command == "plan":
+            return run_plan(args)
+        if args.command == "execute":
+            return run_execute(args)
+        if args.command == "ai-plan":
+            return run_ai_plan(args)
+        if args.command == "show-plan":
+            return run_show_plan(args)
+        if args.command == "run-task":
+            return run_run_task(args)
+        if args.command == "show-task":
+            return run_show_task(args)
+        if args.command == "status":
+            return run_status_command(args)
+        if args.command == "events":
+            return run_events(args)
+        if args.command == "dashboard":
+            return run_dashboard(args)
+    except ApprovalRequired as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_NOT_APPROVED
+    except (ExecutionRefused, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        # `issue` predates the refusal codes and has always returned 1.
+        return EXIT_ERROR if args.command == "issue" else EXIT_REFUSED
+    except PlanningError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_PLANNING_FAILED
+    except (GitHubAPIError, WorktreeError, RunRegistryError, FileExistsError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    parser.error("Unknown command.")
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

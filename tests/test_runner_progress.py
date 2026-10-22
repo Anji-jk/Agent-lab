@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import claude_runner
+import scripts.claude_runner as claude_runner
 from scripts.claude_runner import ProgressTracker, write_json_atomic
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -219,3 +219,90 @@ def test_cli_passes_the_role_through(monkeypatch, tmp_path):
                                       "--prompt", "hi", "--role", "reviewer"])
     claude_runner.main()
     assert seen["role"] == "reviewer"
+
+
+def test_every_event_line_gets_a_time_in_a_file_beside_it(tmp_path, fake_claude):
+    task_id = f"progress-{uuid.uuid4().hex[:8]}"
+    result = claude_runner.run_task(task_id=task_id, prompt="x", cwd=tmp_path,
+                                    timeout_seconds=60, role="builder")
+    events = Path(result["events_file"]).read_text(encoding="utf-8").splitlines()
+    times = Path(result["event_times_file"]).read_text(encoding="utf-8").splitlines()
+    assert len(events) == len(times) == 3
+    assert json.loads(events[0])["type"] == "system"  # the raw stream is unchanged
+    stamps = [claude_runner.datetime.fromisoformat(t) for t in times]
+    assert stamps == sorted(stamps) and all(s.tzinfo is not None for s in stamps)
+
+
+# --- totals over a run that woke up again (M3.2: "1 turn" for a 9-minute builder) ------------
+
+
+def test_turns_add_up_over_every_result_and_tokens_use_the_running_totals():
+    first = {"type": "result", "num_turns": 15, "total_cost_usd": 0.1054,
+             "usage": {"input_tokens": 16, "cache_read_input_tokens": 136148, "output_tokens": 4697},
+             "modelUsage": {"sonnet": {"inputTokens": 16, "cacheReadInputTokens": 136148, "outputTokens": 4697}}}
+    last = {"type": "result", "num_turns": 1, "total_cost_usd": 0.1142,
+            "usage": {"input_tokens": 2, "cache_read_input_tokens": 20984, "output_tokens": 336},
+            "modelUsage": {"sonnet": {"inputTokens": 18, "cacheReadInputTokens": 157132,
+                                      "cacheCreationInputTokens": 12027, "outputTokens": 5033}}}
+    totals = claude_runner.extract_usage(last, [first, last])
+    assert totals["num_turns"] == 16
+    assert (totals["input_tokens"], totals["cache_read_input_tokens"], totals["output_tokens"]) == (18, 157132, 5033)
+    assert totals["cache_creation_input_tokens"] == 12027
+    assert totals["total_cost_usd"] == 0.1142  # already a running total
+
+
+def test_without_running_totals_each_results_usage_is_added():
+    first = {"num_turns": 3, "usage": {"input_tokens": 10, "output_tokens": 5}}
+    last = {"num_turns": 2, "usage": {"input_tokens": 4, "output_tokens": 1}, "total_cost_usd": 0.02}
+    totals = claude_runner.extract_usage(last, [first, last])
+    assert (totals["num_turns"], totals["input_tokens"], totals["output_tokens"]) == (5, 14, 6)
+    assert totals["cache_read_input_tokens"] is None
+
+
+def test_one_result_works_as_before():
+    only = {"num_turns": 3, "total_cost_usd": 0.0235,
+            "usage": {"input_tokens": 4, "cache_read_input_tokens": 9083, "output_tokens": 517}}
+    totals = claude_runner.extract_usage(only)
+    assert (totals["num_turns"], totals["input_tokens"], totals["output_tokens"]) == (3, 4, 517)
+
+
+def test_models_are_added_together_when_a_run_uses_two():
+    last = {"num_turns": 4, "modelUsage": {"sonnet": {"inputTokens": 10, "outputTokens": 100},
+                                           "haiku": {"inputTokens": 5, "outputTokens": 20}}}
+    totals = claude_runner.extract_usage(last, [last])
+    assert (totals["input_tokens"], totals["output_tokens"]) == (15, 120)
+
+
+TWICE = r"""
+import json
+def say(event):
+    print(json.dumps(event), flush=True)
+say({"type": "system", "subtype": "init", "session_id": "s"})
+say({"type": "result", "subtype": "success", "session_id": "s", "result": "first", "num_turns": 15,
+     "total_cost_usd": 0.10, "modelUsage": {"m": {"inputTokens": 16, "outputTokens": 4697}}})
+say({"type": "system", "subtype": "init", "session_id": "s"})
+say({"type": "result", "subtype": "success", "session_id": "s", "result": "final", "num_turns": 1,
+     "total_cost_usd": 0.11, "usage": {"input_tokens": 2, "output_tokens": 336},
+     "modelUsage": {"m": {"inputTokens": 18, "outputTokens": 5033}}})
+"""
+
+
+def test_a_run_that_answers_twice_reports_the_whole_run(tmp_path, monkeypatch):
+    script = tmp_path / "twice.py"
+    script.write_text(TWICE, encoding="utf-8")
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _: "claude-stand-in")
+    original = claude_runner.subprocess.Popen
+
+    def popen(command, *args, **kwargs):
+        if isinstance(command, list) and command and command[0] == "claude-stand-in":
+            command = [sys.executable, "-u", str(script)]
+        return original(command, *args, **kwargs)
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", popen)
+    result = claude_runner.run_task(task_id=f"twice-{uuid.uuid4().hex[:8]}", prompt="x", cwd=tmp_path,
+                                    timeout_seconds=60, role="builder")
+    assert result["status"] == "succeeded" and result["result_text"] == "final"
+    assert result["result_count"] == 2
+    assert (result["num_turns"], result["output_tokens"], result["total_cost_usd"]) == (16, 5033, 0.11)
+    progress = read(result["progress_file"])
+    assert (progress["turns"], progress["output_tokens"]) == (16, 5033)

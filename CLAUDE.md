@@ -6,10 +6,15 @@ isolated execution, subagents, monitoring, and verification.
 
 ## Project structure
 - src/: Python application code
-- tests/: Automated tests
+- tests/: Automated tests, in a folder per area (the same names as below,
+  plus scripts/ and src/)
 - data/: Sample input files
-- orchestrator/: GitHub-Issue-driven orchestration (planning, execution,
-  run registry, worktrees)
+- orchestrator/: GitHub-Issue-driven orchestration, one folder per area:
+  cli/ (commands, printing), github/ (client, Issue), planning/ (AI planner,
+  plan file, profiles), execution/ (task pipeline, agents, checks, roles,
+  runner adapter, worktrees), records/ (run and task records, step log),
+  monitoring/ (status, events, dashboard), legacy/ (the first single-agent
+  path), errors.py (shared error types)
 - scripts/claude_runner.py: Headless Claude Code runner used by the
   orchestrator
 
