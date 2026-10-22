@@ -31,6 +31,28 @@ def test_builder_prompt_says_how_to_run_commands_and_when_it_is_blocked():
     assert "not being able to run a command is not a blocker" in prompt
 
 
+@pytest.mark.parametrize("make", [
+    lambda: ta.builder_prompt(ISSUE, TASK),
+    lambda: ta.tester_prompt(ISSUE, TASK, ["calc.py"]),
+], ids=["builder", "tester"])
+def test_builder_and_tester_are_told_to_run_only_their_own_tests(make):
+    prompt = make()
+    assert "Never run the whole suite" in prompt and "orchestrator runs it after you" in prompt
+    assert "code that imports it" in prompt and "Grep" in prompt  # dependents too
+    assert "longer than 2 minutes is moved to the background" in prompt
+    assert "one simple command at a time" in prompt and "heredocs" in prompt
+    assert "do not rely on them" in prompt  # combined commands are not all refused
+
+
+def test_builder_and_tester_get_the_same_command_rules():
+    assert ta.COMMAND_RULES in ta.builder_prompt(ISSUE, TASK)
+    assert ta.COMMAND_RULES in ta.tester_prompt(ISSUE, TASK, ["calc.py"])
+
+
+def test_the_reviewer_runs_nothing_so_gets_no_command_rules():
+    assert ta.COMMAND_RULES not in ta.reviewer_prompt(ISSUE, TASK, "diff", ["fact"])
+
+
 def test_builder_prompt_includes_feedback_only_when_given():
     assert "earlier attempt" not in ta.builder_prompt(ISSUE, TASK)
     assert "needs docs" in ta.builder_prompt(ISSUE, TASK, "needs docs")

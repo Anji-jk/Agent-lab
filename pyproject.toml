@@ -10,4 +10,4 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src","scripts"]
+pythonpath = [".","src","scripts"]

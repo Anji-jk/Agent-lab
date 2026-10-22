@@ -64,6 +64,30 @@ def _task_block(issue: dict, task: dict) -> str:
     )
 
 
+# How the builder and tester may run commands. One block, so the two cannot drift
+# apart. Seen in real runs (M3.2 to M3.4): an agent that ran the whole suite waited
+# about 8 minutes for it, because Bash moves anything slower than 2 minutes to the
+# background; the orchestrator then ran the same suite again.
+COMMAND_RULES = (
+    "- Run tests narrowly: the test files for the code you changed AND for the code "
+    "that imports it, because a change can break a file that uses it. Find those "
+    "importers with Grep (for example, search for the changed module's name), then "
+    "name the test files: `python -m pytest tests/src/test_csv_summary.py "
+    "tests/cli/test_cli.py -q`. Never run the whole suite (`python -m pytest` with "
+    "no file, or the whole `tests` folder): it takes many minutes on this machine, "
+    "and the orchestrator runs it after you anyway and fails the task if anything "
+    "in it fails.\n"
+    "- A command that takes longer than 2 minutes is moved to the background and "
+    "keeps you waiting. If a test run is slow, run fewer tests.\n"
+    "- Run one simple command at a time: no pipes, `;`, `&&`, `2>&1`, redirection or "
+    "heredocs. Some combined commands happen to be allowed and others are refused, "
+    "so do not rely on them. Change files only with Edit or Write.\n"
+    "- Apart from pytest and read-only git commands, a command may be refused, for "
+    "example running the program itself. That does not block you: name in your "
+    "summary anything you could not run.\n"
+)
+
+
 def builder_prompt(issue: dict, task: dict, feedback: str | None = None) -> str:
     extra = f"\nProblems found by an earlier attempt:\n{feedback}\n" if feedback else ""
     return (
@@ -75,12 +99,7 @@ def builder_prompt(issue: dict, task: dict, feedback: str | None = None) -> str:
         "do not touch unrelated files, configuration or dependencies.\n"
         "- You may run `python -m pytest` and read-only git commands. You cannot "
         "commit, and must not try: the orchestrator commits after verification.\n"
-        "- Run one simple command at a time: no pipes, `;`, `&&`, `2>&1` or heredocs. "
-        "A command made of several parts is refused. Change files with Edit or "
-        "Write, never with shell redirection.\n"
-        "- Other commands, such as running the program itself, are refused too. "
-        "That does not block you: the orchestrator runs the full test suite "
-        "itself. Name in the summary anything you could not run.\n"
+        f"{COMMAND_RULES}"
         "- Do not write tests that you then change to make them pass. A separate "
         "tester writes the tests for the acceptance criteria.\n"
         "- If the task cannot be done, say so in the report. Do not pretend. Set "
@@ -103,7 +122,9 @@ def tester_prompt(issue: dict, task: dict, changed_files: list[str]) -> str:
         "under test. If the code is wrong, do not fix it: report the defect.\n"
         "- Do not edit or delete existing tests; add new test files or new test functions.\n"
         "- Write at least one test per acceptance criterion that fails when the "
-        "criterion is not met, then run `python -m pytest` on your tests.\n"
+        "criterion is not met, then run `python -m pytest` on your new test files "
+        "and on the existing tests of the changed code, nothing more.\n"
+        f"{COMMAND_RULES}"
         "- A criterion that cannot be tested automatically goes in `uncovered` "
         "with the reason; do not write a test that proves nothing.\n"
         "- `suspected_defects` is ONLY for defects in the code under test: behaviour "
