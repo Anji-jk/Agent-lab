@@ -527,6 +527,14 @@ def _step_item(index: int, entry: dict[str, Any]) -> Item:
     if step in ("commit_incomplete", "pipeline_crashed"):
         return item("error", step.replace("_", " "),
                     str(entry.get("error") or _lines(entry.get("reasons"))), "error")
+    if step == "task_cancelled":
+        stopped = entry.get("stopped") or []
+        detail = "\n".join(filter(None, [
+            f"stopped processes: {', '.join(map(str, stopped))}" if stopped else "no process was still running",
+            f"agents that were running: {', '.join(entry.get('agents') or [])}" if entry.get("agents") else "",
+            f"left alone, now another program: {', '.join(map(str, entry['not_ours']))}" if entry.get("not_ours") else "",
+        ]))
+        return item("error", "task cancelled", detail, "error")
     if step == "task_finished":
         status = entry.get("status")
         money = _money(entry.get("cost_usd"))

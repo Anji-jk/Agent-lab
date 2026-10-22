@@ -330,7 +330,7 @@
     if (!t) return [h("div", { class: "empty", text: "This task is not in the run." })];
     const parts = [];
     const tab = S.sel.tab;
-    const failed = ["failed", "needs_review"].includes(t.status);
+    const failed = ["failed", "needs_review", "cancelled"].includes(t.status);
     if (tab === "orchestrator") {
       parts.push(head("Orchestrator", taskTone(t.status), t.status, null, ""));
     } else {
@@ -338,7 +338,8 @@
       parts.push(head(tab, agentTone(a), agentLabel(a), a, a.settings));
       if (a.stale) parts.push(card("No heartbeat", h("p", { text: `Nothing from this agent for ${ago(a.heartbeat_age)}. Its process may have stopped.` }), "warn"));
     }
-    if (failed && t.reasons.length) parts.push(card(t.status === "failed" ? "Why it failed" : "Why it needs review", list(t.reasons), "bad"));
+    const why = { failed: "Why it failed", needs_review: "Why it needs review", cancelled: "Cancelled" };
+    if (failed && t.reasons.length) parts.push(card(why[t.status], list(t.reasons), t.status === "cancelled" ? "warn" : "bad"));
     parts.push(tab === "orchestrator" ? orchestratorCard(t) : roleCard(t, tab));
     return parts.filter(Boolean);
   }

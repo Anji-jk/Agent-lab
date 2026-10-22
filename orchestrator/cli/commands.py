@@ -24,6 +24,7 @@ from orchestrator.cli.display import (
 )
 from orchestrator.errors import ApprovalRequired, ExecutionRefused
 from orchestrator.execution.background import start_task_in_background
+from orchestrator.execution.cancel import cancel_task
 from orchestrator.legacy.executor import execute_plan
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.legacy.planning import (
@@ -194,6 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
              "status or dashboard. It keeps running if this window closes.",
     )
 
+    cancel_parser = subparsers.add_parser(
+        "cancel",
+        help="Stop a running task and everything it started; the worktree is kept.",
+    )
+    cancel_parser.add_argument("run_id")
+    cancel_parser.add_argument("task_id")
+    cancel_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
     status_parser = subparsers.add_parser(
         "status",
         help="Show every task of a run and what its agents are doing now. Reads files only.",
@@ -333,6 +342,24 @@ def run_task_in_background(args: argparse.Namespace) -> int:
     print(f"Watch:  python -m orchestrator status {args.run_id} --watch 2")
     print(f"        python -m orchestrator dashboard {args.run_id}")
     print("It keeps running if you close this window. Nothing will be pushed or merged.")
+    return EXIT_OK
+
+
+def run_cancel(args: argparse.Namespace) -> int:
+    result = cancel_task(args.run_id, args.task_id, runs_dir=args.runs_dir)
+    print(f"Cancelled {args.task_id} of run {args.run_id}.")
+    if result.stopped:
+        print(f"Stopped:  process {', '.join(map(str, result.stopped))} and everything it started.")
+    else:
+        print("Stopped:  nothing; no process of this task was still running.")
+    if result.agents:
+        print(f"Agent:    {', '.join(result.agents)} was running; it is marked cancelled.")
+    if result.not_ours:
+        print(f"Left alone: process {', '.join(map(str, result.not_ours))}; that ID now "
+              "belongs to another program.")
+    if result.worktree:
+        print(f"Worktree: kept at {result.worktree}")
+        print(f'          remove it when done: git worktree remove --force "{result.worktree}"')
     return EXIT_OK
 
 
@@ -477,6 +504,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_run_task(args)
         if args.command == "show-task":
             return run_show_task(args)
+        if args.command == "cancel":
+            return run_cancel(args)
         if args.command == "status":
             return run_status_command(args)
         if args.command == "events":
