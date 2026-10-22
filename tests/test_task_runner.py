@@ -324,6 +324,25 @@ def test_reviewer_fail_verdict_blocks_the_commit(world, agents):
     assert git(Path(record["worktree_path"]), "rev-parse", "HEAD") == world["base"]
 
 
+def test_reviewer_notes_are_recorded_but_do_not_block_the_commit(world, agents):
+    # The second live M2.8 run failed only on two remarks the reviewer itself called minor.
+    agents.behaviour["reviewer"] = lambda cwd: json.dumps({
+        "verdict": "pass", "problems": [], "notes": ["tests are in a separate file"],
+        "criteria": [{"criterion": 1, "met": True}, {"criterion": 2, "met": True}]})
+    record = run(world, agents)
+    assert record["status"] == "done" and record["commit"]
+    assert record["findings"]["reviewer_notes"] == ["tests are in a separate file"]
+
+
+def test_a_blocking_reviewer_problem_still_fails_the_task(world, agents):
+    agents.behaviour["reviewer"] = lambda cwd: json.dumps({
+        "verdict": "pass", "problems": ["the message keeps the 'Could not read' prefix"],
+        "criteria": [{"criterion": 1, "met": True}, {"criterion": 2, "met": True}]})
+    record = run(world, agents)
+    assert record["status"] == "failed" and record["commit"] is None
+    assert any("prefix" in r for r in record["reasons"])
+
+
 @pytest.mark.parametrize("criteria", [[], [{"criterion": 1, "met": True}]])
 def test_reviewer_that_skips_criteria_is_not_done(world, agents, criteria):
     agents.behaviour["reviewer"] = lambda cwd: json.dumps({

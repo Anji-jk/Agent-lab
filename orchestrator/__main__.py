@@ -336,6 +336,11 @@ def display_task(record: dict) -> None:
         print("Because:")
         for reason in record["reasons"]:
             print(f"  - {reason}")
+    notes = (record.get("findings") or {}).get("reviewer_notes") or []
+    if notes:
+        print("Reviewer notes (not blocking):")
+        for note in notes:
+            print(f"  - {note}")
     print("History:     " + " -> ".join(step["status"] for step in record.get("history", [])))
 
 

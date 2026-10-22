@@ -283,6 +283,7 @@ class _Pipeline:
         f.reviewer_verdict = report.verdict
         f.unmet = [n for n in range(1, len(self.criteria) + 1) if not report.met.get(n, False)]
         f.reviewer_problems = list(report.problems)
+        f.reviewer_notes = list(report.notes)
         return True
 
 

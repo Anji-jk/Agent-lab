@@ -490,6 +490,12 @@ def test_show_task_missing_is_an_error(tmp_path, capsys):
     assert cli.main(["show-task", "run-ai-9", "T1", "--runs-dir", str(tmp_path)]) == cli.EXIT_ERROR
 
 
+def test_display_task_shows_reviewer_notes(capsys):
+    cli.display_task(task_record("done", findings={"reviewer_notes": ["tests in another file"]}))
+    out = capsys.readouterr().out
+    assert "Reviewer notes (not blocking):" in out and "tests in another file" in out
+
+
 def test_display_task_shows_checks_cost_and_history(capsys):
     cli.display_task(task_record("failed"))
     out = capsys.readouterr().out

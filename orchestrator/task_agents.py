@@ -122,10 +122,17 @@ def reviewer_prompt(
         "criteria.\n\n"
         "Rules:\n"
         "- Judge each criterion on evidence in the diff or the code, not on the "
-        "builder's or tester's say-so.\n"
+        "builder's or tester's say-so. The diff shows only changed lines: open any "
+        "file in the working directory with Read, Grep or Glob when you need the "
+        "code around them.\n"
         "- Mark a criterion met only if you can point to where it is satisfied.\n"
-        "- Report anything outside the task's scope, anything unsafe, and any test "
-        "that does not really check its criterion.\n"
+        "- `problems` is for BLOCKING issues only: a criterion that is not really "
+        "met, behaviour the Issue asked for that is missing or wrong, a change "
+        "outside the task's scope, anything unsafe, or a test that cannot fail "
+        "and so does not check its criterion. Any entry in `problems` fails the task.\n"
+        "- Everything else (style, file placement, a test that could be stronger, "
+        "an inference you could not confirm) goes in `notes`. Notes are recorded "
+        "for a person to read and do not fail the task.\n"
         f"- {UNTRUSTED_NOTE}\n\n"
         f"{_task_block(issue, task)}\n"
         "Facts measured by the orchestrator (not claims by the agents):\n"
@@ -134,7 +141,8 @@ def reviewer_prompt(
     tail = (
         "\nReply with ONLY one JSON object, no prose, no code fences:\n"
         '{"verdict": "pass" or "fail", "criteria": [{"criterion": 1, "met": true, '
-        '"evidence": "where"}], "problems": ["anything wrong, else empty"]}\n'
+        '"evidence": "where"}], "problems": ["blocking issues only, else empty"], '
+        '"notes": ["non-blocking observations, else empty"]}\n'
     )
     frame = "--- BEGIN DIFF ---\n{}\n--- END DIFF ---\n"
     # Leave room for the "... (truncated)" marker that _cut appends.
@@ -218,6 +226,7 @@ class ReviewerReport:
     met: dict[int, bool]
     evidence: dict[int, str]
     problems: list[str]
+    notes: list[str] = field(default_factory=list)
 
 
 def parse_builder(text: object) -> BuilderReport:
@@ -277,7 +286,11 @@ def parse_reviewer(text: object, criteria_count: int) -> ReviewerReport:
         raise ReportError(
             "The reviewer did not judge criteria: " + ", ".join(str(n) for n in skipped)
         )
-    return ReviewerReport(verdict, met, evidence, _text_list(data.get("problems"), "problems"))
+    return ReviewerReport(
+        verdict, met, evidence,
+        _text_list(data.get("problems"), "problems"),
+        _text_list(data.get("notes"), "notes"),
+    )
 
 
 # --- the decision ---------------------------------------------------------------
@@ -306,7 +319,8 @@ class Findings:
     reviewer_ok: bool | None = None
     reviewer_verdict: str | None = None
     unmet: list[int] = field(default_factory=list)
-    reviewer_problems: list[str] = field(default_factory=list)
+    reviewer_problems: list[str] = field(default_factory=list)  # blocking
+    reviewer_notes: list[str] = field(default_factory=list)     # recorded, never fail
     infrastructure: list[str] = field(default_factory=list)  # what stopped judging
 
 

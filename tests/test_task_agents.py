@@ -129,6 +129,23 @@ def test_parse_reviewer_rejects_a_report_that_skips_criteria(criteria):
         ta.parse_reviewer(text, 2)
 
 
+def test_parse_reviewer_keeps_notes_apart_from_problems():
+    text = json.dumps({
+        "verdict": "pass", "criteria": [{"criterion": 1, "met": True}, {"criterion": 2, "met": True}],
+        "problems": [], "notes": ["tests live in a separate file"],
+    })
+    report = ta.parse_reviewer(text, 2)
+    assert report.problems == [] and report.notes == ["tests live in a separate file"]
+    assert ta.parse_reviewer(text.replace(', "notes": ["tests live in a separate file"]', ""), 2).notes == []
+    with pytest.raises(ta.ReportError):
+        ta.parse_reviewer(text.replace('["tests live in a separate file"]', '"x"'), 2)
+
+
+def test_reviewer_prompt_separates_blocking_problems_from_notes():
+    prompt = ta.reviewer_prompt(ISSUE, TASK, "diff", ["fact"])
+    assert "BLOCKING" in prompt and "`notes`" in prompt and "Read, Grep or Glob" in prompt
+
+
 def test_long_text_fields_are_cut():
     report = ta.parse_builder(json.dumps({"summary": "z" * 5000}))
     assert len(report.summary) == ta.MAX_TEXT_FIELD
@@ -146,6 +163,12 @@ def good() -> ta.Findings:
 
 def test_all_good_is_done():
     assert ta.decide(good()) == (ta.DONE, ["Every check passed."])
+
+
+def test_reviewer_notes_never_fail_the_task():
+    f = good()
+    f.reviewer_notes = ["minor: tests in another file", "could assert the message prefix"]
+    assert ta.decide(f) == (ta.DONE, ["Every check passed."])
 
 
 def test_uncovered_with_reason_alone_does_not_fail():
