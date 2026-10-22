@@ -50,6 +50,7 @@ RETAINED_FIELDS = (
     "subtype",
     "events_file",
     "stderr_file",
+    "progress_file",
 )
 
 ProcessRunner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -138,6 +139,7 @@ def invoke_runner(
     tools: str | None = None,
     allowed_tools: Sequence[str] = (),
     disallowed_tools: Sequence[str] = (),
+    role: str | None = None,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -176,6 +178,8 @@ def invoke_runner(
         command += ["--allow", rule]
     for rule in disallowed_tools:
         command += ["--deny", rule]
+    if role:
+        command += ["--role", role]
 
     try:
         completed = process_runner(

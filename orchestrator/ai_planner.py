@@ -256,6 +256,7 @@ def generate_ai_plan(
             max_turns=plan.max_turns,
             keep_result_text=True,
             read_only=True,
+            role="planner",
             runner_script=runner_script,
         )
 

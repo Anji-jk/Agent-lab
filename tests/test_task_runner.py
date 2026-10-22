@@ -86,6 +86,7 @@ class FakeAgents:
         self.behaviour = {"builder": self.build_double, "tester": self.test_double,
                           "reviewer": self.review_pass}
         self.fail = {}  # role -> RunnerOutcome to return instead
+        self.passed_roles: list = []  # the role argument each agent was started with
 
     # -- default behaviours: each returns the agent's final text --
     def build_double(self, cwd):
@@ -127,7 +128,8 @@ class FakeAgents:
             name = "tester"
         else:
             name = "builder"
-        self.calls.append({"role": name, **{k: v for k, v in kwargs.items() if k != "prompt_file"}})
+        self.passed_roles.append(kwargs.get("role"))
+        self.calls.append({**{k: v for k, v in kwargs.items() if k != "prompt_file"}, "role": name})
         self.prompts[name] = Path(kwargs["prompt_file"]).read_text(encoding="utf-8")
         if name in self.fail:
             return self.fail[name]
@@ -200,6 +202,11 @@ def test_each_role_gets_its_own_permissions_and_budget(world, agents):
     for call in agents.calls:
         assert call["model"] == "sonnet" and call["effort"] == "low"
     assert builder["max_budget_usd"] > tester["max_budget_usd"] > reviewer["max_budget_usd"]
+
+
+def test_each_agent_is_started_with_its_role_for_progress(world, agents):
+    run(world, agents)
+    assert agents.passed_roles == ["builder", "tester", "reviewer"]
 
 
 def test_prompts_contain_the_issue_task_and_the_diff(world, agents):

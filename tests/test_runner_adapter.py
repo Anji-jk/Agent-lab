@@ -362,3 +362,10 @@ def test_agent_env_loads_in_a_fresh_interpreter_without_scripts_on_the_path():
     )
     assert done.returncode == 0, done.stderr[-400:]
     assert done.stdout.split() == ["False", "True"]
+
+
+def test_role_is_passed_to_the_runner(runner_script, tmp_path):
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(runner_script, tmp_path, runner, role="tester")
+    command, _ = runner.calls[0]
+    assert command[command.index("--role") + 1] == "tester"

@@ -164,6 +164,7 @@ class _Pipeline:
                 max_budget_usd=settings.max_budget_usd,
                 keep_result_text=True,
                 runner_script=self.runner_script,
+                role=name,
                 **role(name).runner_options(),
             )
         self.agents[name] = {

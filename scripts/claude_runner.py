@@ -66,6 +66,167 @@ def extract_usage(result_event: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+# --- live progress -----------------------------------------------------------
+# While an agent runs, progress.json next to result.json says what it is doing.
+# It is rewritten as events arrive (at most every MIN_WRITE_SECONDS) and at
+# least every HEARTBEAT_SECONDS while the runner is alive, so a reader can tell
+# "busy in a long tool call" (heartbeat moving, no new events) from "dead"
+# (heartbeat stopped). Writing it is best effort and never stops a run.
+
+PROGRESS_FILE_NAME = "progress.json"
+HEARTBEAT_SECONDS = 5.0
+MIN_WRITE_SECONDS = 0.5
+TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+ROLE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
+
+def write_json_atomic(path: Path, data: dict[str, Any]) -> bool:
+    """Write via a temporary file and swap it in, so a reader never sees half a file.
+
+    On Windows the swap can fail while a reader holds the file open; that write
+    is skipped (False) and the next one tries again.
+    """
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, path)
+        return True
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+class ProgressTracker:
+    """What one agent is doing, rebuilt from Claude's event stream as it arrives."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        task_id: str,
+        role: str | None,
+        clock=time.monotonic,
+    ) -> None:
+        self.path = path
+        self.clock = clock
+        now = utc_now()
+        self.data: dict[str, Any] = {
+            "task_id": task_id,
+            "role": role,
+            "state": "starting",  # starting -> running -> finished
+            "status": None,  # the runner's final status once finished
+            "pid": None,
+            "session_id": None,
+            "started_at": now,
+            "heartbeat_at": now,
+            "last_event_at": None,
+            "last_event_type": None,
+            "events": 0,
+            "turns": 0,
+            "tool_calls": 0,
+            "last_tool": None,
+            **{field: 0 for field in TOKEN_FIELDS},
+            "total_cost_usd": None,
+            "finished_at": None,
+        }
+        self._usage: dict[str, dict[str, int]] = {}  # message id -> its usage
+        self._tool_ids: set[str] = set()
+        self._last_write: float | None = None
+
+    def started(self, pid: int) -> None:
+        self.data["pid"] = pid
+        self.data["state"] = "running"
+
+    def observe(self, event: dict[str, Any]) -> None:
+        data = self.data
+        data["events"] += 1
+        data["last_event_at"] = utc_now()
+        data["last_event_type"] = str(event.get("type", "unknown"))[:40]
+        session_id = event.get("session_id")
+        if isinstance(session_id, str):
+            data["session_id"] = session_id
+        if event.get("type") != "assistant":
+            return
+
+        # Each value is read once into a variable and then checked, so a type
+        # checker can follow the checks (it cannot narrow a repeated .get()).
+        raw_message = event.get("message")
+        message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else {}
+        raw_id = message.get("id")
+        message_id = raw_id if isinstance(raw_id, str) else f"event-{data['events']}"
+        raw_usage = message.get("usage")
+        usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+        # One reply arrives as several events with the same message id and
+        # the same usage, so usage is kept per message, never added per event.
+        self._usage[message_id] = {field: _count(usage.get(field)) for field in TOKEN_FIELDS}
+
+        raw_content = message.get("content")
+        content: list[Any] = raw_content if isinstance(raw_content, list) else []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            raw_tool_id = block.get("id")
+            tool_id = raw_tool_id if isinstance(raw_tool_id, str) else f"tool-{len(self._tool_ids)}"
+            if tool_id in self._tool_ids:
+                continue
+            self._tool_ids.add(tool_id)
+            name = block.get("name")
+            if isinstance(name, str):
+                data["last_tool"] = name[:80]
+
+        data["turns"] = len(self._usage)
+        data["tool_calls"] = len(self._tool_ids)
+        for field in TOKEN_FIELDS:
+            data[field] = sum(entry[field] for entry in self._usage.values())
+
+    def finish(self, result: dict[str, Any]) -> None:
+        data = self.data
+        data["state"] = "finished"
+        data["status"] = result.get("status")
+        data["finished_at"] = utc_now()
+        if isinstance(result.get("total_cost_usd"), (int, float)):
+            data["total_cost_usd"] = result["total_cost_usd"]
+        # Claude's own totals, when it sent them, replace the running count.
+        if isinstance(result.get("num_turns"), int):
+            data["turns"] = result["num_turns"]
+        for field in TOKEN_FIELDS:
+            if isinstance(result.get(field), int):
+                data[field] = result[field]
+
+    def write(self, *, force: bool = False) -> bool:
+        """Write now if forced, or if MIN_WRITE_SECONDS have passed since the last write."""
+        now = self.clock()
+        if not force and self._last_write is not None and now - self._last_write < MIN_WRITE_SECONDS:
+            return False
+        return self._write(now)
+
+    def heartbeat(self) -> bool:
+        """Write if nothing has been written for HEARTBEAT_SECONDS."""
+        now = self.clock()
+        if self._last_write is not None and now - self._last_write < HEARTBEAT_SECONDS:
+            return False
+        return self._write(now)
+
+    def _write(self, now: float) -> bool:
+        self._last_write = now
+        self.data["heartbeat_at"] = utc_now()
+        return write_json_atomic(self.path, self.data)
+
+
 # Flags that make a run read-only no matter what the user's or project's
 # settings allow. Inserted right after "-p" so the variadic
 # --disallowedTools value is followed by a flag, never by the prompt.
@@ -197,6 +358,7 @@ def run_task(
     tools: str | None = None,
     allowed_tools: Sequence[str] = (),
     disallowed_tools: Sequence[str] = (),
+    role: str | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
         raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
@@ -219,6 +381,8 @@ def run_task(
         validate_tool_patterns(tools.split(","), "tools")
     if read_only and (isolated or tools or allowed_tools or disallowed_tools):
         raise ValueError("read_only cannot be combined with custom tool settings.")
+    if role is not None and not ROLE_PATTERN.fullmatch(role):
+        raise ValueError("role must be a short lowercase name, such as 'builder'.")
 
     cwd = cwd.resolve()
     if not cwd.is_dir():
@@ -231,6 +395,8 @@ def run_task(
     events_path = run_dir / "events.jsonl"
     stderr_path = run_dir / "stderr.log"
     result_path = run_dir / "result.json"
+    progress = ProgressTracker(run_dir / PROGRESS_FILE_NAME, task_id=task_id, role=role)
+    progress.write(force=True)
 
     command = shutil.which("claude")
     started_at = utc_now()
@@ -256,8 +422,10 @@ def run_task(
         "tools": tools,
         "allowed_tools": list(allowed_tools),
         "disallowed_tools": list(disallowed_tools),
+        "role": role,
         "events_file": str(events_path),
         "stderr_file": str(stderr_path),
+        "progress_file": str(progress.path),
         "event_count": 0,
         "event_types": {},
         "session_id": None,
@@ -275,6 +443,8 @@ def run_task(
             finished_at=utc_now(),
             duration_seconds=round(time.monotonic() - started_clock, 3),
         )
+        progress.finish(result)
+        progress.write(force=True)
         write_json(result_path, result)
         return result
 
@@ -325,6 +495,8 @@ def run_task(
 
             result["pid"] = process.pid
             result["status"] = "running"
+            progress.started(process.pid)
+            progress.write(force=True)
 
             assert process.stdout is not None
             stdout = process.stdout
@@ -357,6 +529,7 @@ def run_task(
                     try:
                         line = lines.get(timeout=0.2)
                     except queue.Empty:
+                        progress.heartbeat()
                         if process.poll() is not None and not reader.is_alive():
                             break
                         continue
@@ -385,6 +558,9 @@ def run_task(
 
                     if event.get("session_id"):
                         result["session_id"] = event["session_id"]
+
+                    progress.observe(event)
+                    progress.write()
 
                     if event_type == "result":
                         result["claude_result_event"] = event
@@ -424,6 +600,8 @@ def run_task(
     result["finished_at"] = utc_now()
     result["duration_seconds"] = round(time.monotonic() - started_clock, 3)
 
+    progress.finish(result)
+    progress.write(force=True)
     write_json(result_path, result)
     return result
 
@@ -457,6 +635,7 @@ def main() -> int:
         help="Ignore your settings and deny anything not pre-approved.",
     )
     parser.add_argument("--tools", help="Comma-separated built-in tools that exist.")
+    parser.add_argument("--role", help="Who this agent is (builder, tester, ...), for progress.")
     parser.add_argument(
         "--allow", action="append", default=[], metavar="RULE",
         help="Pre-approve a tool or rule such as 'Bash(git diff:*)' (repeatable).",
@@ -489,6 +668,7 @@ def main() -> int:
             tools=args.tools,
             allowed_tools=args.allow,
             disallowed_tools=args.deny,
+            role=args.role,
         )
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

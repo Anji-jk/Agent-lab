@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from orchestrator.planning import (
     build_plan,
 )
 from orchestrator.profiles import profile_for
+from orchestrator.progress import format_status, planner_view, run_status, stale_agents
 from orchestrator.run_registry import RunRegistryError
 from orchestrator.task_registry import load_task
 from orchestrator.task_runner import run_task
@@ -171,6 +174,18 @@ def build_parser() -> argparse.ArgumentParser:
     run_task_parser.add_argument(
         "--worktree-root", type=Path, default=None,
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
+    )
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show every task of a run and what its agents are doing now. Reads files only.",
+    )
+    status_parser.add_argument("run_id")
+    status_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    status_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    status_parser.add_argument(
+        "--watch", type=float, metavar="SECONDS",
+        help="Refresh every SECONDS until nothing is running (Ctrl+C to stop).",
     )
 
     show_task_parser = subparsers.add_parser(
@@ -366,6 +381,37 @@ def run_run_task(args: argparse.Namespace) -> int:
     }.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
 
 
+def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
+    """Print the run's status once; True while any task is still in progress."""
+    tasks = run_status(runs_dir, run_id)
+    planner = planner_view(run_id)
+    if not tasks and planner is None and not plan_path(plans_dir, run_id).exists():
+        raise RunRegistryError(f"No plan or tasks found for run {run_id}.")
+    print(format_status(run_id, tasks, planner))
+    stale = stale_agents(tasks)
+    if stale:
+        print(f"\nWarning: no heartbeat from {', '.join(stale)}. Its process may have stopped.")
+    return any(task.active_role for task in tasks)
+
+
+def run_status_command(args: argparse.Namespace) -> int:
+    if not args.watch:
+        _print_status(args.run_id, args.runs_dir, args.plans_dir)
+        return EXIT_OK
+    if args.watch < 1:
+        raise ValueError("--watch must be at least 1 second.")
+    try:
+        while True:
+            os.system("cls" if os.name == "nt" else "clear")
+            print(time.strftime("%H:%M:%S"), "(Ctrl+C to stop)\n")
+            if not _print_status(args.run_id, args.runs_dir, args.plans_dir):
+                print("\nNothing is running any more.")
+                return EXIT_OK
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        return EXIT_OK
+
+
 def run_show_task(args: argparse.Namespace) -> int:
     display_task(load_task(args.runs_dir, args.run_id, args.task_id))
     return EXIT_OK
@@ -428,6 +474,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_run_task(args)
         if args.command == "show-task":
             return run_show_task(args)
+        if args.command == "status":
+            return run_status_command(args)
     except ApprovalRequired as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_NOT_APPROVED
