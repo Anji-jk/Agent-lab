@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import claude_runner
+import scripts.claude_runner as claude_runner
 from scripts.claude_runner import ProgressTracker, write_json_atomic
 
 ROOT = Path(__file__).resolve().parent.parent.parent
