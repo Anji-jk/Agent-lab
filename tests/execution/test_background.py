@@ -81,7 +81,8 @@ def test_it_starts_the_ordinary_run_task_command_and_returns_once_the_record_exi
     started = start(world, fake)
     assert fake.started is not None
     command = fake.started["command"]
-    assert command[:6] == [sys.executable, "-m", "orchestrator", "run-task", RUN, "T1"]
+    # The project's Python, not whichever one started this (M3.8: system Python had no pytest).
+    assert command[:6] == [bg.project_python(), "-m", "orchestrator", "run-task", RUN, "T1"]
     assert "--background" not in command  # the child runs in the foreground: no loop
     assert command[command.index("--runs-dir") + 1] == str(world["runs"].resolve())
     assert command[command.index("--worktree-root") + 1] == str(world["worktrees"].resolve())
@@ -94,7 +95,7 @@ def test_the_process_id_and_command_are_recorded_for_later_steps(world):
     fake = FakeProcess(world)
     started = start(world, fake)
     launch = json.loads(started.launch.read_text(encoding="utf-8"))
-    assert isinstance(launch, dict) and fake.started is not None
+    assert fake.started is not None
     assert launch["pid"] == 4242 and launch["command"] == fake.started["command"]
     assert launch["log"] == str(started.log) and launch["started_at"]
 

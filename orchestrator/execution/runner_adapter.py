@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from orchestrator.execution.checks import project_python, with_python_on_path
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "claude_runner.py"
 
@@ -149,6 +151,7 @@ def invoke_runner(
     allowed_tools: Sequence[str] = (),
     disallowed_tools: Sequence[str] = (),
     role: str | None = None,
+    env: dict[str, str] | None = None,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -201,6 +204,9 @@ def invoke_runner(
             errors="replace",
             timeout=timeout_seconds + OUTER_TIMEOUT_GRACE,
             check=False,
+            # The runner hands PATH on to Claude, so an agent's plain `python` is the
+            # project's Python (with pytest), not whichever one is first on PATH.
+            env=with_python_on_path(dict(os.environ) if env is None else env, project_python()),
         )
     except subprocess.TimeoutExpired:
         return RunnerOutcome(

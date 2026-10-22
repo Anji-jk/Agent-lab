@@ -478,7 +478,9 @@ def test_check_environment_removes_credentials(monkeypatch):
         "PATH": "/bin", "ANTHROPIC_API_KEY": "secret", "claude_code_oauth_token": "t",
         "CLAUDE_CONFIG_DIR": "/c", "HOME": "/h"})
     env = tr.check_environment(Path("x"))
-    assert env == {"PATH": "/bin", "HOME": "/h", "PYTHONDONTWRITEBYTECODE": "1"}
+    python_folder = str(Path(tc.project_python()).parent)  # put first on PATH (M3.8)
+    assert env == {"PATH": python_folder + os.pathsep + "/bin", "HOME": "/h",
+                   "PYTHONDONTWRITEBYTECODE": "1"}
 
 
 # --- M3.3: the orchestrator's own event log -----------------------------------------
@@ -545,3 +547,25 @@ def test_a_log_that_cannot_be_written_does_not_stop_the_task(world, agents, monk
     monkeypatch.setattr(task_events, "task_events_path", lambda *args: blocker / "events.jsonl")
     record = run(world, agents)
     assert record["status"] == "done"
+
+
+# --- the suite's Python is checked before anything is paid for (M3.8) -----------------------
+
+
+def test_a_python_without_pytest_is_refused_before_any_agent_runs(world, agents, monkeypatch):
+    monkeypatch.setattr(tc, "pytest_problem", lambda python, env=None: "No module named pytest")
+    with pytest.raises(ExecutionRefused, match="pytest is not available"):
+        run(world, agents)
+    assert agents.calls == [] and list_tasks(world["runs"], RUN_ID) == {}
+
+
+def test_a_test_command_that_is_not_pytest_is_not_checked(world, agents, monkeypatch):
+    monkeypatch.setattr(tc, "pytest_problem", lambda python, env=None: pytest.fail("checked"))
+    run(world, agents, test_command=(sys.executable, "-c", "pass"))
+
+
+def test_the_checks_environment_puts_the_projects_python_first_on_path(monkeypatch):
+    monkeypatch.setattr(tr.runner_adapter, "load_agent_env", lambda script: {"PATH": "elsewhere"})
+    env = tr.check_environment(Path("runner.py"))
+    folder = str(Path(tc.project_python()).parent)
+    assert env["PATH"].split(os.pathsep) == [folder, "elsewhere"]

@@ -17,7 +17,54 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 DELETED = "<deleted>"
-DEFAULT_TEST_COMMAND = (sys.executable, "-m", "pytest", "-q")
+
+# Which Python runs the tests, the background pipeline and the agents' `python`.
+# Not simply the one that started the orchestrator: from a terminal without the
+# venv activated that is the system Python, which has no pytest (seen in M3.8).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PYTHON_VARIABLE = "AGENT_LAB_PYTHON"
+PYTEST_CHECK_TIMEOUT_SECONDS = 60
+
+
+def project_python(root: Path = PROJECT_ROOT, environ: dict[str, str] | None = None) -> str:
+    """AGENT_LAB_PYTHON if set, else the project's .venv if it exists, else this Python."""
+    environ = os.environ if environ is None else environ
+    override = environ.get(PYTHON_VARIABLE)
+    if override:
+        return override
+    for candidate in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
+
+
+def with_python_on_path(env: dict[str, str], python: str) -> dict[str, str]:
+    """``env`` with ``python``'s folder first on PATH, so a plain `python` is that one."""
+    env = dict(env)
+    key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    folder = str(Path(python).parent)
+    rest = env.get(key, "")
+    env[key] = folder + (os.pathsep + rest if rest else "")
+    return env
+
+
+def pytest_problem(python: str, env: dict[str, str] | None = None) -> str | None:
+    """Why ``python -m pytest`` cannot run, or None when it can."""
+    try:
+        completed = subprocess.run(
+            [python, "-m", "pytest", "--version"], env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=PYTEST_CHECK_TIMEOUT_SECONDS, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"{python} could not be started ({type(exc).__name__})"
+    if completed.returncode != 0:
+        lines = ((completed.stderr or "") + (completed.stdout or "")).strip().splitlines()
+        return lines[-1][:300] if lines else f"exit code {completed.returncode}"
+    return None
+
+
+DEFAULT_TEST_COMMAND = (project_python(), "-m", "pytest", "-q")
 
 # Files that tools leave behind and that are never part of the work.
 _NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache"})

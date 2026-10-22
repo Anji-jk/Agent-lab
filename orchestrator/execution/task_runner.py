@@ -68,7 +68,7 @@ def check_environment(runner_script: Path) -> dict[str, str]:
         if key.upper() not in CREDENTIAL_VARIABLES
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return env
+    return tc.with_python_on_path(env, tc.project_python())
 
 
 def find_task(plan: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -362,6 +362,14 @@ def run_task(
         raise ExecutionRefused(f"Runner script not found: {runner_script}")
 
     env = check_environment(runner_script) if env is None else env
+    # Before anything is created or paid for: a suite that cannot start fails every task.
+    if tuple(test_command[1:3]) == ("-m", "pytest"):
+        problem = tc.pytest_problem(test_command[0], env)
+        if problem:
+            raise ExecutionRefused(
+                f"pytest is not available for {test_command[0]}: {problem}. Activate the "
+                f"project's .venv or set {tc.PYTHON_VARIABLE} to a Python that has pytest."
+            )
     log = TaskLog(runs_dir, run_id, task_id)
     save_task(runs_dir, run_id, task_id, {
         "title": task["title"],

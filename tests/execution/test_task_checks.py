@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 
@@ -261,3 +262,49 @@ def test_run_suite_and_named_tests(repo):
     assert not tc.run_suite(repo, timeout=120).passed
     assert tc.run_named_tests(repo, ["tests/test_app.py"], timeout=120).passed
     assert not tc.run_named_tests(repo, ["tests/test_bad.py::test_b"], timeout=120).passed
+
+
+# --- which Python runs the tests (M3.8: a run started from system Python had no pytest) ---
+
+
+def test_project_python_prefers_the_projects_venv(tmp_path):
+    venv = tmp_path / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+    venv.mkdir(parents=True)
+    python = venv / ("python.exe" if sys.platform == "win32" else "python")
+    python.write_text("")
+    assert tc.project_python(tmp_path, environ={}) == str(python)
+
+
+def test_project_python_falls_back_to_this_python_without_a_venv(tmp_path):
+    assert tc.project_python(tmp_path, environ={}) == sys.executable
+
+
+def test_the_python_variable_wins(tmp_path):
+    chosen = str(tmp_path / "elsewhere" / "python.exe")
+    assert tc.project_python(tmp_path, environ={tc.PYTHON_VARIABLE: chosen}) == chosen
+
+
+def test_with_python_on_path_puts_its_folder_first_and_keeps_the_rest(tmp_path):
+    python = str(tmp_path / "venv" / "python.exe")
+    env = tc.with_python_on_path({"Path": "a" + os.pathsep + "b", "X": "1"}, python)
+    assert env["Path"].split(os.pathsep) == [str(tmp_path / "venv"), "a", "b"]
+    assert env["X"] == "1" and "PATH" not in env  # the existing key is reused, not duplicated
+    assert tc.with_python_on_path({}, python)["PATH"] == str(tmp_path / "venv")
+
+
+def test_pytest_problem_is_none_for_a_python_with_pytest():
+    assert tc.pytest_problem(sys.executable) is None
+
+
+def test_pytest_problem_explains_a_python_without_it(monkeypatch):
+    def no_pytest(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 1, stdout="",
+                                           stderr="C:\\Python314\\python.exe: No module named pytest\n")
+
+    monkeypatch.setattr(tc.subprocess, "run", no_pytest)
+    assert tc.pytest_problem("C:\\Python314\\python.exe") == "C:\\Python314\\python.exe: No module named pytest"
+
+
+def test_pytest_problem_explains_a_python_that_does_not_exist(tmp_path):
+    problem = tc.pytest_problem(str(tmp_path / "missing-python.exe"))
+    assert problem and "could not be started" in problem

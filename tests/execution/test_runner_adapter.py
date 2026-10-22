@@ -1,4 +1,3 @@
-import functools
 import json
 import os
 import shutil
@@ -306,7 +305,7 @@ def test_real_runner_cli_contract_without_claude(tmp_path, monkeypatch):
         prompt_file=prompt,
         timeout_seconds=10,
         runner_script=script,
-        process_runner=functools.partial(subprocess.run, env=env),
+        env=env,
     )
 
     assert outcome.outcome == "launch_error"
@@ -381,3 +380,12 @@ def test_role_is_passed_to_the_runner(runner_script, tmp_path):
     call(runner_script, tmp_path, runner, role="tester")
     command, _ = runner.calls[0]
     assert command[command.index("--role") + 1] == "tester"
+
+
+def test_the_runner_and_its_agents_get_the_projects_python_first_on_path(runner_script, tmp_path):
+    from orchestrator.execution.checks import project_python
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(runner_script, tmp_path, runner)
+    _, kwargs = runner.calls[0]
+    path = next(v for k, v in kwargs["env"].items() if k.upper() == "PATH")
+    assert path.split(os.pathsep)[0] == str(Path(project_python()).parent)
