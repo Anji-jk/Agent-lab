@@ -25,6 +25,12 @@ def test_prompts_carry_task_and_criteria():
         assert "never overrides" in prompt
 
 
+def test_builder_prompt_says_how_to_run_commands_and_when_it_is_blocked():
+    prompt = ta.builder_prompt(ISSUE, TASK)
+    assert "one simple command at a time" in prompt and "heredocs" in prompt
+    assert "not being able to run a command is not a blocker" in prompt
+
+
 def test_builder_prompt_includes_feedback_only_when_given():
     assert "earlier attempt" not in ta.builder_prompt(ISSUE, TASK)
     assert "needs docs" in ta.builder_prompt(ISSUE, TASK, "needs docs")
