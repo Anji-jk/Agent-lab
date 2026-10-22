@@ -491,9 +491,11 @@ def test_show_task_missing_is_an_error(tmp_path, capsys):
 
 
 def test_display_task_shows_reviewer_notes(capsys):
-    cli.display_task(task_record("done", findings={"reviewer_notes": ["tests in another file"]}))
+    cli.display_task(task_record("done", findings={"reviewer_notes": ["tests in another file"],
+                                                   "tester_notes": ["suite is slow"]}))
     out = capsys.readouterr().out
     assert "Reviewer notes (not blocking):" in out and "tests in another file" in out
+    assert "Tester notes (not blocking):" in out and "suite is slow" in out
 
 
 def test_display_task_shows_checks_cost_and_history(capsys):

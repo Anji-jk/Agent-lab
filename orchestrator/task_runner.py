@@ -232,6 +232,7 @@ class _Pipeline:
 
         f.uncovered = dict(report.uncovered)
         f.suspected_defects = list(report.suspected_defects)
+        f.tester_notes = list(report.notes)
         f.unnamed = [
             n for n in range(1, len(self.criteria) + 1)
             if n not in report.coverage and n not in report.uncovered

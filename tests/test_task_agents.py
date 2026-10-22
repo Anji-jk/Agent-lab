@@ -141,6 +141,20 @@ def test_parse_reviewer_keeps_notes_apart_from_problems():
         ta.parse_reviewer(text.replace('["tests live in a separate file"]', '"x"'), 2)
 
 
+def test_parse_tester_keeps_notes_apart_from_defects():
+    text = json.dumps({"coverage": [{"criterion": 1, "tests": ["tests/t.py::a"]},
+                                    {"criterion": 2, "tests": ["tests/t.py::b"]}],
+                       "suspected_defects": [], "notes": ["the full suite takes 8 minutes"]})
+    report = ta.parse_tester(text, 2)
+    assert report.suspected_defects == [] and report.notes == ["the full suite takes 8 minutes"]
+
+
+def test_tester_prompt_says_what_counts_as_a_defect():
+    prompt = ta.tester_prompt(ISSUE, TASK, [])
+    assert "ONLY for defects in the code under test" in prompt and "`notes`" in prompt
+    assert "contradict" in prompt
+
+
 def test_reviewer_prompt_separates_blocking_problems_from_notes():
     prompt = ta.reviewer_prompt(ISSUE, TASK, "diff", ["fact"])
     assert "BLOCKING" in prompt and "`notes`" in prompt and "Read, Grep or Glob" in prompt
@@ -168,6 +182,7 @@ def test_all_good_is_done():
 def test_reviewer_notes_never_fail_the_task():
     f = good()
     f.reviewer_notes = ["minor: tests in another file", "could assert the message prefix"]
+    f.tester_notes = ["the full suite takes 8 minutes"]
     assert ta.decide(f) == (ta.DONE, ["Every check passed."])
 
 

@@ -334,6 +334,18 @@ def test_reviewer_notes_are_recorded_but_do_not_block_the_commit(world, agents):
     assert record["findings"]["reviewer_notes"] == ["tests are in a separate file"]
 
 
+def test_tester_notes_are_recorded_but_do_not_fail_the_task(world, agents):
+    # The broken-plan M2.8 run stopped on a tester remark about test speed.
+    agents.behaviour["tester"] = lambda cwd: (
+        agents.test_double(cwd) and json.dumps({"coverage": [
+            {"criterion": 1, "tests": ["tests/test_double.py::test_positive"]},
+            {"criterion": 2, "tests": ["tests/test_double.py::test_negative"]}],
+            "notes": ["the full suite is slow"]}))
+    record = run(world, agents)
+    assert record["status"] == "done"
+    assert record["findings"]["tester_notes"] == ["the full suite is slow"]
+
+
 def test_a_blocking_reviewer_problem_still_fails_the_task(world, agents):
     agents.behaviour["reviewer"] = lambda cwd: json.dumps({
         "verdict": "pass", "problems": ["the message keeps the 'Could not read' prefix"],

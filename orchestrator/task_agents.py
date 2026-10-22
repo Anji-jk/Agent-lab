@@ -98,6 +98,12 @@ def tester_prompt(issue: dict, task: dict, changed_files: list[str]) -> str:
         "criterion is not met, then run `python -m pytest` on your tests.\n"
         "- A criterion that cannot be tested automatically goes in `uncovered` "
         "with the reason; do not write a test that proves nothing.\n"
+        "- `suspected_defects` is ONLY for defects in the code under test: behaviour "
+        "that breaks an acceptance criterion or what the Issue asks for. If two "
+        "criteria contradict each other so that both cannot hold, say so there, "
+        "naming both numbers. Any entry fails the task.\n"
+        "- Anything else (slow tests, style, ideas for more tests) goes in `notes`. "
+        "Notes are recorded for a person to read and never fail the task.\n"
         f"- {UNTRUSTED_NOTE}\n\n"
         f"{_task_block(issue, task)}\n"
         f"Files the builder changed: {', '.join(changed_files) or '(none)'}\n\n"
@@ -105,7 +111,8 @@ def tester_prompt(issue: dict, task: dict, changed_files: list[str]) -> str:
         '{"summary": "what you tested", "coverage": [{"criterion": 1, '
         '"tests": ["tests/test_x.py::test_name"]}], '
         '"uncovered": [{"criterion": 2, "reason": "why"}], '
-        '"suspected_defects": ["anything wrong in the code"]}\n'
+        '"suspected_defects": ["defects in the code under test, else empty"], '
+        '"notes": ["non-blocking observations, else empty"]}\n'
         "`criterion` is the number from the list above.\n"
     )
 
@@ -218,6 +225,7 @@ class TesterReport:
     coverage: dict[int, list[str]]
     uncovered: dict[int, str]
     suspected_defects: list[str]
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +269,7 @@ def parse_tester(text: object, criteria_count: int) -> TesterReport:
         coverage=coverage,
         uncovered=uncovered,
         suspected_defects=_text_list(data.get("suspected_defects"), "suspected_defects"),
+        notes=_text_list(data.get("notes"), "notes"),
     )
 
 
@@ -314,6 +323,7 @@ class Findings:
     missing_tests: list[str] = field(default_factory=list)  # named but not collected / not found
     weakened_tests: list[str] = field(default_factory=list)
     suspected_defects: list[str] = field(default_factory=list)
+    tester_notes: list[str] = field(default_factory=list)       # recorded, never fail
     suite_passed: bool | None = None
     named_passed: bool | None = None
     reviewer_ok: bool | None = None

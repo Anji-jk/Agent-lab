@@ -336,11 +336,12 @@ def display_task(record: dict) -> None:
         print("Because:")
         for reason in record["reasons"]:
             print(f"  - {reason}")
-    notes = (record.get("findings") or {}).get("reviewer_notes") or []
-    if notes:
-        print("Reviewer notes (not blocking):")
-        for note in notes:
-            print(f"  - {note}")
+    findings = record.get("findings") or {}
+    for label, key in (("Tester", "tester_notes"), ("Reviewer", "reviewer_notes")):
+        if findings.get(key):
+            print(f"{label} notes (not blocking):")
+            for note in findings[key]:
+                print(f"  - {note}")
     print("History:     " + " -> ".join(step["status"] for step in record.get("history", [])))
 
 
