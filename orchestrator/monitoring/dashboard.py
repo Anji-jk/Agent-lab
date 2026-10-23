@@ -36,10 +36,10 @@ from orchestrator.monitoring import progress
 from orchestrator.execution import runner_adapter
 from orchestrator.planning.profiles import profile_for, role_settings
 from orchestrator.execution.roles import ROLE_NAMES, role
-from orchestrator.records.run_registry import validate_run_id
+from orchestrator.records.run_registry import RunRegistryError, validate_run_id
 from orchestrator.records.task_events import task_events_path
 from orchestrator.planning.plan_file import PLAN_FILE_NAME, load_task_plan, plan_path
-from orchestrator.records.task_registry import ACTIVE_STATUSES, list_tasks, validate_task_id
+from orchestrator.records.task_registry import ACTIVE_STATUSES, list_tasks, load_task, validate_task_id
 
 DEFAULT_PORT = 8765
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -241,7 +241,11 @@ class DashboardData:
             if tab == "orchestrator":
                 return task_events_path(self.runs_dir, run_id, task_id), "orchestrator"
             if tab in ROLE_NAMES:
-                agent_run = progress.agent_run_id(run_id, task_id, tab)
+                try:
+                    attempt = progress.attempt_of(load_task(self.runs_dir, run_id, task_id))
+                except RunRegistryError:
+                    attempt = 1
+                agent_run = progress.agent_run_id(run_id, task_id, tab, attempt)
                 path = progress.progress_path(agent_run, self.runner_script).with_name(
                     event_feed.EVENTS_FILE_NAME)
                 return path, "agent"

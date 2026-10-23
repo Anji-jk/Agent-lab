@@ -88,8 +88,15 @@ COMMAND_RULES = (
 )
 
 
-def builder_prompt(issue: dict, task: dict, feedback: str | None = None) -> str:
+def _earlier_block(earlier: str | None) -> str:
+    """What a continued task's worktree already holds (M4.5)."""
+    return f"\nAbout this worktree:\n{earlier}\n" if earlier else ""
+
+
+def builder_prompt(issue: dict, task: dict, feedback: str | None = None,
+                   earlier: str | None = None) -> str:
     extra = f"\nProblems found by an earlier attempt:\n{feedback}\n" if feedback else ""
+    extra += _earlier_block(earlier)
     return (
         "You are the BUILDER for one task. Implement it in the current "
         "working directory, which is an isolated Git worktree.\n\n"
@@ -113,7 +120,8 @@ def builder_prompt(issue: dict, task: dict, feedback: str | None = None) -> str:
     )
 
 
-def tester_prompt(issue: dict, task: dict, changed_files: list[str]) -> str:
+def tester_prompt(issue: dict, task: dict, changed_files: list[str],
+                  earlier: str | None = None) -> str:
     return (
         "You are the TESTER for one task. The builder has already changed the code "
         "in the current working directory (an isolated Git worktree).\n\n"
@@ -135,7 +143,8 @@ def tester_prompt(issue: dict, task: dict, changed_files: list[str]) -> str:
         "Notes are recorded for a person to read and never fail the task.\n"
         f"- {UNTRUSTED_NOTE}\n\n"
         f"{_task_block(issue, task)}\n"
-        f"Files the builder changed: {', '.join(changed_files) or '(none)'}\n\n"
+        f"Files the builder changed: {', '.join(changed_files) or '(none)'}\n"
+        f"{_earlier_block(earlier)}\n"
         "When finished, reply with ONLY one JSON object, no prose, no code fences:\n"
         '{"summary": "what you tested", "coverage": [{"criterion": 1, '
         '"tests": ["tests/test_x.py::test_name"]}], '

@@ -37,9 +37,20 @@ def read_progress(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def agent_run_id(run_id: str, task_id: str, role: str) -> str:
-    """The runner's ID for one agent of a task; ``task_runner`` names them this way."""
-    return f"{run_id}-{task_id}-{role}"
+def agent_run_id(run_id: str, task_id: str, role: str, attempt: int = 1) -> str:
+    """The runner's ID for one agent of a task; ``task_runner`` names them this way.
+
+    A retry (M4.4) is attempt 2 and gets its own IDs, so the first attempt's files stay.
+    """
+    if attempt <= 1:
+        return f"{run_id}-{task_id}-{role}"
+    return f"{run_id}-{task_id}-r{attempt}-{role}"
+
+
+def attempt_of(record: dict[str, Any] | None) -> int:
+    """Which attempt a task record is: 1 unless it says otherwise (older records say nothing)."""
+    value = (record or {}).get("attempt")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else 1
 
 
 def progress_path(run_id: str, runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT) -> Path:
@@ -153,7 +164,7 @@ def agent_view_from_record(role: str, summary: object) -> AgentView | None:
 def task_agent_view(run_id: str, task_id: str, role: str, record: dict[str, Any],
                 runner_script: Path, now: datetime) -> AgentView:
     """Live progress if the runner left a file, else the record's summary, else not started."""
-    progress = read_progress(progress_path(agent_run_id(run_id, task_id, role), runner_script))
+    progress = read_progress(progress_path(agent_run_id(run_id, task_id, role, attempt_of(record)), runner_script))
     if progress is not None:
         return agent_view(role, progress, now)
     agents = record.get("agents")

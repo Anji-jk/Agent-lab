@@ -87,14 +87,29 @@ def display_task(record: dict) -> None:
     print(f"Task {record['task_id']} of run {record['run_id']}: {record['status']}")
     print(f"Title:       {record.get('title', '')}")
     print(f"Base commit: {record.get('base_commit', '')[:12]}")
+    for earlier in record.get("previous_attempts") or []:
+        why = (earlier.get("reasons") or ["no reason recorded"])[0]
+        cost = earlier.get("cost_usd")
+        spent = f", ${cost:.4f}" if isinstance(cost, (int, float)) else ""
+        print(f"Attempt {earlier.get('attempt')}: {earlier.get('status')}{spent} - {why[:150]}")
+    if record.get("attempt", 1) > 1 and record.get("continued_at"):
+        print(f"This is attempt {record['attempt']}: the stopped attempt {record['attempt'] - 1} "
+              f"continued from {record['continued_at']}, in the same worktree.")
+    elif record.get("attempt", 1) > 1:
+        print(f"This is attempt {record['attempt']} (a retry, told what attempt {record['attempt'] - 1} got wrong).")
     if record.get("branch"):
         print(f"Branch:      {record['branch']}")
         print(f"Worktree:    {record.get('worktree_path')}")
     if record.get("commit"):
         print(f"Commit:      {record['commit']}")
+    reused = record.get("reused_agents") or {}
+    stopped = record.get("status") in ("cancelled", "pending", "building", "testing", "reviewing")
     for name, settings in (record.get("roles") or {}).items():
         agent = (record.get("agents") or {}).get(name, {})
-        outcome = agent.get("outcome", "not run")
+        if name in reused and not agent:
+            agent = {**reused[name], "outcome": "kept from the stopped attempt"}
+        default = "no result recorded (the task was stopped)" if stopped else "not run"
+        outcome = agent.get("outcome", default)
         cost = agent.get("total_cost_usd")
         spent = f", spent ${cost:.4f}" if isinstance(cost, (int, float)) else ""
         print(f"  {settings} -> {outcome}{spent}")

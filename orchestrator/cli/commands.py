@@ -25,6 +25,7 @@ from orchestrator.cli.display import (
 from orchestrator.errors import ApprovalRequired, ExecutionRefused
 from orchestrator.execution.background import start_task_in_background
 from orchestrator.execution.cancel import cancel_task
+from orchestrator.execution.continuing import continue_task
 from orchestrator.legacy.executor import execute_plan
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.legacy.planning import (
@@ -40,6 +41,10 @@ from orchestrator.records.run_registry import RunRegistryError
 from orchestrator.records.task_registry import load_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.planning.plan_file import load_task_plan, plan_path
+from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
+from orchestrator.scheduling.plan_progress import (
+    format_plan_progress, plan_progress, process_liveness,
+)
 from orchestrator.github.issue import Task
 from orchestrator.execution.worktrees import (
     WorktreeError,
@@ -190,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
     )
     run_task_parser.add_argument(
+        "--continue", dest="continue_task", action="store_true",
+        help="Continue a cancelled or interrupted task from the stage it reached, in the "
+             "same worktree with its files kept, with fresh agents.",
+    )
+    run_task_parser.add_argument(
         "--background", action="store_true",
         help="Start the task as its own process and return at once; watch it with "
              "status or dashboard. It keeps running if this window closes.",
@@ -308,8 +318,20 @@ def run_show_plan(args: argparse.Namespace) -> int:
 def run_run_task(args: argparse.Namespace) -> int:
     plan = load_task_plan(args.plans_dir, args.run_id)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
+    if args.background and args.continue_task:
+        print("--continue runs in this window for now (run-plan will continue tasks in the "
+              "background). Run it again without --background.", file=sys.stderr)
+        return EXIT_USAGE
     if args.background:
         return run_task_in_background(args)
+    if args.continue_task:
+        print(f"Continuing {args.task_id} of run {args.run_id} from where it stopped; "
+              "fresh agents call Claude and may take a while...", file=sys.stderr)
+        record = continue_task(args.run_id, args.task_id, plans_dir=args.plans_dir,
+                               runs_dir=args.runs_dir, repo_path=args.repo_path)
+        display_task(record)
+        print("\nNothing was pushed or merged.")
+        return {"done": EXIT_OK, "failed": EXIT_TASK_FAILED}.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
     print(
         f"Running {args.task_id} of run {args.run_id}: builder, tester and reviewer "
         "agents call Claude and may take a while...",
@@ -364,16 +386,22 @@ def run_cancel(args: argparse.Namespace) -> int:
 
 
 def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
-    """Print the run's status once; True while any task is still in progress."""
+    """Print the run's status once; True while any task is still running."""
     tasks = run_status(runs_dir, run_id)
     planner = planner_view(run_id)
-    if not tasks and planner is None and not plan_path(plans_dir, run_id).exists():
+    has_plan = plan_path(plans_dir, run_id).exists()
+    if not tasks and planner is None and not has_plan:
         raise RunRegistryError(f"No plan or tasks found for run {run_id}.")
     print(format_status(run_id, tasks, planner))
     stale = stale_agents(tasks)
     if stale:
         print(f"\nWarning: no heartbeat from {', '.join(stale)}. Its process may have stopped.")
-    return any(task.active_role for task in tasks)
+    if not has_plan:
+        return any(task.active_role for task in tasks)
+    progress = plan_progress(load_task_plan(plans_dir, run_id), runs_dir, run_id)
+    print("\n" + format_plan_progress(progress))
+    # An interrupted task's record still says "testing"; only a live process counts.
+    return progress.state == "running"
 
 
 def run_status_command(args: argparse.Namespace) -> int:
@@ -443,7 +471,11 @@ def run_dashboard(args: argparse.Namespace) -> int:
 
 
 def run_show_task(args: argparse.Namespace) -> int:
-    display_task(load_task(args.runs_dir, args.run_id, args.task_id))
+    record = load_task(args.runs_dir, args.run_id, args.task_id)
+    display_task(record)
+    # A cancelled or interrupted task has no verdict; show what its agents left behind.
+    if is_stopped(record, process_liveness(args.runs_dir, args.run_id)):
+        print("\n" + format_left_behind(left_behind(record)))
     return EXIT_OK
 
 

@@ -151,6 +151,59 @@ def changed_paths(worktree: Path) -> list[str]:
     return sorted({path for path in parse_status(raw) if not is_noise(path)})
 
 
+MAX_COUNTED_BYTES = 1_000_000
+
+
+def _tracked_sizes(worktree: Path) -> dict[str, tuple[int | None, int | None]]:
+    """Lines added and removed in tracked files against HEAD; None for a binary file."""
+    parts = _git(worktree, "diff", "--numstat", "-z", "HEAD").split("\0")
+    sizes: dict[str, tuple[int | None, int | None]] = {}
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        fields = entry.split("\t", 2)
+        if len(fields) < 3:
+            continue
+        added, removed, path = fields
+        if not path:  # a rename: the old and the new name follow as their own parts
+            index += 1
+            path = parts[index] if index < len(parts) else ""
+            index += 1
+        if path:
+            sizes[path] = (
+                int(added) if added.isdigit() else None,
+                int(removed) if removed.isdigit() else None,
+            )
+    return sizes
+
+
+def change_sizes(worktree: Path) -> list[tuple[str, str, int | None, int | None]]:
+    """(path, "new" | "modified" | "deleted", lines added, lines removed) for every changed file.
+
+    Read-only: it does not stage anything. New files have no entry in git's own
+    count, so their lines are counted from the file (None when it is binary or large).
+    """
+    tracked = _tracked_sizes(worktree)
+    rows: list[tuple[str, str, int | None, int | None]] = []
+    for path in changed_paths(worktree):
+        target = Path(worktree) / path
+        if path in tracked:
+            added, removed = tracked[path]
+            rows.append((path, "modified" if target.exists() else "deleted", added, removed))
+            continue
+        lines: int | None = None
+        try:
+            if target.is_file() and target.stat().st_size <= MAX_COUNTED_BYTES:
+                data = target.read_bytes()
+                if b"\0" not in data:
+                    lines = len(data.decode("utf-8", errors="replace").splitlines())
+        except OSError:
+            pass
+        rows.append((path, "new" if target.exists() else "deleted", lines, 0 if lines is not None else None))
+    return rows
+
+
 def snapshot(worktree: Path) -> dict[str, str]:
     """Content fingerprint of every changed file, to compare between agents."""
     result: dict[str, str] = {}

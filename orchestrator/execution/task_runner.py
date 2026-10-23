@@ -15,6 +15,7 @@ task's own branch in the task's own worktree. Nothing is pushed or merged.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 import tempfile
 from dataclasses import dataclass
@@ -32,8 +33,11 @@ from orchestrator.execution.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER, 
 from orchestrator.records.run_registry import RunRegistryError
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.task_events import NullLog, TaskLog
-from orchestrator.records.task_registry import load_task, save_task, update_task
+from orchestrator.records.task_registry import (
+    ACTIVE_STATUSES, list_tasks, load_task, save_task, update_task,
+)
 from orchestrator.execution.worktrees import create_worktree
+from orchestrator.monitoring.progress import agent_run_id as attempt_agent_run_id
 
 TEST_DIRS = (f"{TEST_DIR}/",)
 # The full suite took 496 s in a worktree outside OneDrive on Windows (M2.8).
@@ -45,7 +49,9 @@ AGENT_METRIC_FIELDS = (
     "status", "duration_seconds", "total_cost_usd", "input_tokens",
     "output_tokens", "num_turns", "model", "session_id",
 )
-MAX_RUN_ID_FOR_TASK = 55  # the worktree run ID adds "-<task id>" and must stay <= 64
+MAX_RUN_ID_FOR_TASK = 52  # the worktree run ID adds "-<task id>" and a retry's "-r2", and must stay <= 64
+# (task ID, its record) -> (is its process still running, why we think so)
+IsAlive = Callable[[str, dict[str, Any]], tuple[bool, str]]
 
 
 class TaskNotReady(ExecutionRefused):
@@ -79,6 +85,57 @@ def find_task(plan: dict[str, Any], task_id: str) -> dict[str, Any]:
     raise ExecutionRefused(f"The plan has no task {task_id!r} (it has: {known}).")
 
 
+def run_head(repo_path: Path, run_id: str, records: dict[str, dict[str, Any]], plan_base: str) -> str:
+    """The commit the run's next task starts from (M4.2).
+
+    Every task of a run starts from the newest finished work, so the run's
+    commits form one chain on one branch and need no merge: the head is the
+    finished commit that contains all the others. Before anything is finished
+    it is the commit the plan was made from. A task that depends on others
+    starts from a commit containing theirs, because the head contains every
+    finished task's commit.
+    """
+    finished = [(task_id, record["commit"]) for task_id, record in sorted(records.items())
+                if record.get("status") == "done" and record.get("commit")]
+    if not finished:
+        return plan_base
+    for task_id, commit in finished:
+        if not tc.commit_exists(repo_path, commit):
+            raise ExecutionRefused(
+                f"{task_id}'s commit {commit[:12]} does not exist in {repo_path}; the run's "
+                "work cannot be continued from it."
+            )
+    head = tc.pick_base_commit(repo_path, [commit for _, commit in finished])
+    if head is None:
+        listed = ", ".join(f"{task_id} at {commit[:12]}" for task_id, commit in finished)
+        raise TaskNotReady(
+            f"The finished work of run {run_id} is on separate branches ({listed}), "
+            "from before a run's tasks shared one branch. Combining them needs a merge, "
+            "which a later stage provides; plan again for a new run."
+        )
+    return head
+
+
+def check_no_other_task_running(
+    task_id: str, records: dict[str, dict[str, Any]], is_alive: IsAlive
+) -> None:
+    """Refuse while another task of the run is still running.
+
+    Two tasks started from the same head would put their work on two branches
+    again. A task whose process has gone (a closed window) does not count: it
+    left no commit, so it cannot split the chain.
+    """
+    for other, record in sorted(records.items()):
+        if other == task_id or record.get("status") not in ACTIVE_STATUSES | {"pending"}:
+            continue
+        alive, why = is_alive(other, record)
+        if alive:
+            raise TaskNotReady(
+                f"{other} is still running ({why}). A run's tasks share one branch, so "
+                f"they run one at a time; wait for {other} to finish or cancel it."
+            )
+
+
 def prepare(
     run_id: str,
     task_id: str,
@@ -86,6 +143,7 @@ def prepare(
     plans_dir: Path,
     runs_dir: Path,
     repo_path: Path,
+    is_alive: IsAlive | None = None,
 ) -> TaskContext:
     """Everything that must be true before anything is created."""
     plan = load_task_plan(plans_dir, run_id)
@@ -98,7 +156,6 @@ def prepare(
         raise ExecutionRefused(f"Run ID is too long to add a task suffix (max {MAX_RUN_ID_FOR_TASK}).")
     task = find_task(plan, task_id)
 
-    commits: list[str] = []
     for dependency in task["depends_on"]:
         try:
             record = load_task(runs_dir, run_id, dependency)
@@ -108,18 +165,18 @@ def prepare(
             raise TaskNotReady(
                 f"{dependency} is {record['status']}, not done; {task_id} depends on it."
             )
-        commits.append(record["commit"])
+
+    records = list_tasks(runs_dir, run_id)
+    if is_alive is None:
+        # Imported here: the scheduling package imports this module's callers.
+        from orchestrator.scheduling.plan_progress import process_liveness
+        is_alive = process_liveness(runs_dir, run_id)
+    check_no_other_task_running(task_id, records, is_alive)
 
     base = plan["config"]["base_commit"]
-    if commits:
-        base = tc.pick_base_commit(repo_path, commits)
-        if base is None:
-            raise TaskNotReady(
-                f"{task_id} depends on tasks whose work is on separate branches. "
-                "Combining them needs a merge, which a later stage provides."
-            )
     if not tc.commit_exists(repo_path, base):
         raise ExecutionRefused(f"Base commit {base[:12]} does not exist in {repo_path}.")
+    base = run_head(repo_path, run_id, records, base)
 
     profile = profile_for(task["complexity"])
     return TaskContext(plan, task, base, {name: role_settings(profile, name) for name in ROLE_NAMES})
@@ -140,8 +197,11 @@ def _total_cost(agents: dict[str, dict[str, Any]]) -> float:
 class _Pipeline:
     def __init__(self, ctx: TaskContext, run_id: str, runs_dir: Path, worktree: Path,
                  runner_script: Path, invoke_runner, test_command: tuple[str, ...], env,
-                 log: TaskLog | NullLog | None = None):
+                 log: TaskLog | NullLog | None = None, attempt: int = 1,
+                 feedback: str | None = None, earlier: str | None = None):
         self.ctx, self.run_id, self.runs_dir = ctx, run_id, runs_dir
+        self.attempt, self.feedback, self.earlier = attempt, feedback, earlier
+        self.reused: dict[str, dict[str, Any]] = {}  # agents' results kept from the stopped attempt
         self.log = log or NullLog()
         self.worktree, self.runner_script = worktree, runner_script
         self.invoke_runner, self.test_command, self.env = invoke_runner, test_command, env
@@ -166,7 +226,7 @@ class _Pipeline:
 
     def call(self, name: str, prompt: str) -> runner_adapter.RunnerOutcome:
         settings = self.ctx.settings[name]
-        agent_run_id = f"{self.run_id}-{self.task['id']}-{name}"
+        agent_run_id = attempt_agent_run_id(self.run_id, self.task["id"], name, self.attempt)
         self.log.emit("agent_started", role=name, agent_run_id=agent_run_id,
                       settings=settings.describe())
         with tempfile.TemporaryDirectory(prefix="agent-lab-task-") as scratch:
@@ -216,11 +276,47 @@ class _Pipeline:
         self.log.emit("suite_finished", **_command_fields(result))
         return result
 
+    # -- checkpoints (M4.5) --
+    def checkpoint(self, next_stage: str) -> bool:
+        """Save what a continued task needs to start at ``next_stage``. Always True.
+
+        The builder's and tester's results, and the orchestrator's findings, live
+        only in this process until the task ends; a checkpoint puts them in the
+        record, so a stopped task can be continued without paying for them again.
+        """
+        data: dict[str, Any] = {
+            "stage": next_stage,
+            "after_build": self.after_build,
+            "checks": self.checks,
+            "findings": {k: getattr(self.findings, k) for k in self.findings.__dataclass_fields__},
+            "agents": {**self.reused, **self.agents},
+        }
+        if next_stage == "reviewing":
+            data["after_tests"] = tc.snapshot(self.worktree)
+        try:
+            update_task(self.runs_dir, self.run_id, self.task["id"], {"checkpoint": data})
+        except (OSError, RunRegistryError, ValueError):
+            pass  # a missing checkpoint only means a continue starts earlier
+        return True
+
+    def restore(self, checkpoint: dict[str, Any]) -> None:
+        """Take up the stopped attempt's results from its checkpoint."""
+        self.after_build = dict(checkpoint.get("after_build") or {})
+        self.checks = dict(checkpoint.get("checks") or {})
+        saved = dict(checkpoint.get("findings") or {})
+        # JSON turned the criterion numbers into strings.
+        saved["uncovered"] = {int(k): v for k, v in (saved.get("uncovered") or {}).items()}
+        fields = ta.Findings.__dataclass_fields__
+        self.findings = ta.Findings(**{k: v for k, v in saved.items() if k in fields})
+        self.reused = dict(checkpoint.get("agents") or {})
+
     # -- stages --
     def build(self) -> bool:
         f = self.findings
+        self.reused.pop(BUILDER, None)  # this stage's agent is run again, not reused
         self.set_status("building")
-        outcome = self.call(BUILDER, ta.builder_prompt(self.ctx.plan["issue"], self.task))
+        outcome = self.call(BUILDER, ta.builder_prompt(self.ctx.plan["issue"], self.task, self.feedback,
+                                                       self.earlier))
         if outcome.outcome != "success":
             return False
         report = self.report(BUILDER, outcome, ta.parse_builder)
@@ -240,10 +336,13 @@ class _Pipeline:
 
     def run_tests(self) -> bool:
         f = self.findings
+        self.reused.pop(TESTER, None)
+        f.missing_tests = []  # a continued task may carry the stopped attempt's
         self.set_status("testing")
         changed_by_builder = self.checks["builder_changed"]
         outcome = self.call(
-            TESTER, ta.tester_prompt(self.ctx.plan["issue"], self.task, changed_by_builder)
+            TESTER, ta.tester_prompt(self.ctx.plan["issue"], self.task, changed_by_builder,
+                                     self.earlier)
         )
         if outcome.outcome != "success":
             return False
@@ -294,6 +393,7 @@ class _Pipeline:
 
     def review(self) -> bool:
         f = self.findings
+        self.reused.pop(REVIEWER, None)
         self.set_status("reviewing")
         suite, named = self.checks.get("suite", {}), self.checks.get("named_tests", {})
         facts = [
@@ -352,16 +452,28 @@ def run_task(
     worktree_root: Path | None = None,
     runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
     invoke_runner=runner_adapter.invoke_runner,
-    test_command: tuple[str, ...] = tc.DEFAULT_TEST_COMMAND,
+    test_command: tuple[str, ...] | None = None,
     env: dict[str, str] | None = None,
+    attempt: int = 1,
+    feedback: str | None = None,
+    previous_attempts: list[dict[str, Any]] | None = None,
+    continue_from: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one task end to end and return its final record."""
     ctx = prepare(run_id, task_id, plans_dir=plans_dir, runs_dir=runs_dir, repo_path=repo_path)
     task, plan = ctx.task, ctx.plan
+    start = (continue_from or {}).get("stage", "building")
+    if continue_from and continue_from["base_commit"] != ctx.base_commit:
+        raise TaskNotReady(
+            f"{task_id} started from {continue_from['base_commit'][:12]}, but the run has "
+            f"moved on to {ctx.base_commit[:12]} since (another task finished). Continuing "
+            "it would split the run's branch."
+        )
     if not Path(runner_script).is_file():
         raise ExecutionRefused(f"Runner script not found: {runner_script}")
 
     env = check_environment(runner_script) if env is None else env
+    test_command = tc.DEFAULT_TEST_COMMAND if test_command is None else test_command
     # Before anything is created or paid for: a suite that cannot start fails every task.
     if tuple(test_command[1:3]) == ("-m", "pytest"):
         problem = tc.pytest_problem(test_command[0], env)
@@ -372,6 +484,7 @@ def run_task(
             )
     log = TaskLog(runs_dir, run_id, task_id)
     save_task(runs_dir, run_id, task_id, {
+        "status": start if continue_from else "pending",
         "title": task["title"],
         "complexity": task["complexity"],
         "depends_on": task["depends_on"],
@@ -379,14 +492,23 @@ def run_task(
         "roles": {name: s.describe() for name, s in ctx.settings.items()},
         # The process running this pipeline, for cancel and for spotting one that died.
         "pid": os.getpid(),
+        **({"attempt": attempt, "previous_attempts": previous_attempts or []} if attempt > 1 else {}),
+        **({"continued_at": start} if continue_from else {}),
     })
-    log.emit("task_started", base_commit=ctx.base_commit, title=task["title"], pid=os.getpid())
+    log.emit("task_started", base_commit=ctx.base_commit, title=task["title"], pid=os.getpid(),
+             **({"attempt": attempt} if attempt > 1 else {}))
 
     try:
-        branch, worktree = create_worktree(
-            repo_path, plan["issue"]["number"], f"{run_id}-{task_id.lower()}",
-            base_ref=ctx.base_commit, worktree_root=worktree_root,
-        )
+        if continue_from:  # the stopped attempt's worktree, files and all
+            branch, worktree = continue_from["branch"], Path(continue_from["worktree_path"])
+            if not worktree.is_dir():
+                raise FileNotFoundError(f"The worktree {worktree} no longer exists.")
+        else:
+            branch, worktree = create_worktree(
+                repo_path, plan["issue"]["number"],
+                f"{run_id}-{task_id.lower()}" + (f"-r{attempt}" if attempt > 1 else ""),
+                base_ref=ctx.base_commit, worktree_root=worktree_root,
+            )
     except Exception as exc:
         log.emit("worktree_failed", error=str(exc))
         log.emit("task_finished", status="failed", cost_usd=0)
@@ -397,9 +519,16 @@ def run_task(
     log.emit("worktree_created", branch=branch, path=str(worktree))
 
     pipeline = _Pipeline(ctx, run_id, runs_dir, worktree, Path(runner_script),
-                         invoke_runner, test_command, env, log)
+                         invoke_runner, test_command, env, log, attempt, feedback,
+                         (continue_from or {}).get("earlier"))
     try:
-        if pipeline.build() and pipeline.run_tests():
+        if start == "building":
+            go = (pipeline.build() and pipeline.checkpoint("testing")
+                  and pipeline.run_tests() and pipeline.checkpoint("reviewing"))
+        else:
+            pipeline.restore(continue_from["checkpoint"])  # type: ignore[index]
+            go = start == "reviewing" or (pipeline.run_tests() and pipeline.checkpoint("reviewing"))
+        if go:
             pipeline.review()
         status, reasons = ta.decide(pipeline.findings)
         log.emit("decided", status=status, reasons=reasons)
@@ -425,6 +554,7 @@ def run_task(
         "reasons": reasons,
         "commit": commit,
         "agents": pipeline.agents,
+        **({"reused_agents": pipeline.reused} if pipeline.reused else {}),
         "checks": pipeline.checks,
         "findings": {k: getattr(pipeline.findings, k) for k in pipeline.findings.__dataclass_fields__},
         "cost_usd": _total_cost(pipeline.agents),

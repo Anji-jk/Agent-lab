@@ -35,6 +35,7 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.background import launch_path
 from orchestrator.execution.roles import ROLE_NAMES
+from orchestrator.monitoring.progress import agent_run_id, attempt_of
 from orchestrator.records.run_registry import utc_now, write_json_atomic
 from orchestrator.records.task_events import TaskLog
 from orchestrator.records.task_registry import FINAL_STATUSES, load_task, update_task
@@ -141,10 +142,12 @@ def _launch_pid(runs_dir: Path, run_id: str, task_id: str) -> int | None:
     return pid if isinstance(pid, int) else None
 
 
-def _running_agents(run_id: str, task_id: str, runner_script: Path) -> list[tuple[str, Path, dict[str, Any]]]:
+def _running_agents(run_id: str, task_id: str, runner_script: Path,
+                    attempt: int = 1) -> list[tuple[str, Path, dict[str, Any]]]:
     running = []
     for role in ROLE_NAMES:
-        path = runner_adapter.runner_run_directory(f"{run_id}-{task_id}-{role}", runner_script) / "progress.json"
+        agent = agent_run_id(run_id, task_id, role, attempt)
+        path = runner_adapter.runner_run_directory(agent, runner_script) / "progress.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -193,7 +196,7 @@ def cancel_task(
             result.not_ours.append(pid)
 
     # Then any agent still running on its own (its pipeline had already died).
-    running = _running_agents(run_id, task_id, Path(runner_script))
+    running = _running_agents(run_id, task_id, Path(runner_script), attempt_of(record))
     for role, _, data in running:
         result.agents.append(role)
         pid = data.get("pid")
