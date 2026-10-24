@@ -35,7 +35,7 @@ from orchestrator.records.task_registry import ACTIVE_STATUSES
 MESSAGE_LIMIT = 400
 COMMAND_LIMIT = 120
 MAX_FILES_SHOWN = 15
-UNVERIFIED = "not checked by anything: the agents were stopped before they could report"
+UNVERIFIED = "unverified: the task was stopped before its checks and review finished"
 _PYTEST = re.compile(r"\bpytest\b")
 
 IsAlive = Callable[[str, dict[str, Any]], tuple[bool, str]]
