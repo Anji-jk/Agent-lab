@@ -114,8 +114,20 @@ def kill_tree(pid: int) -> None:
 
 
 def is_task_process(line: str, run_id: str, task_id: str) -> bool:
+    """Is this command line the process running the task: its run-task, or the run's run-plan?
+
+    run-plan (M4.7) runs every task in its own process, so a task it runs records
+    run-plan's process ID; that line names the run but not the task.
+    """
     words = line.split()
-    return "orchestrator" in line and "run-task" in words and run_id in words and task_id in words
+    if "orchestrator" not in line or run_id not in words:
+        return False
+    return ("run-task" in words and task_id in words) or "run-plan" in words
+
+
+def is_plan_process(line: str, run_id: str) -> bool:
+    words = line.split()
+    return "orchestrator" in line and "run-plan" in words and run_id in words
 
 
 def is_agent_process(line: str) -> bool:

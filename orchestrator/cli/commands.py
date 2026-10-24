@@ -27,6 +27,7 @@ from orchestrator.execution.background import start_task_in_background
 from orchestrator.execution.budget import format_budget, remove_budget, set_budget
 from orchestrator.execution.cancel import cancel_task
 from orchestrator.execution.continuing import continue_task
+from orchestrator.execution.retry import retry_task
 from orchestrator.legacy.executor import execute_plan
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.legacy.planning import (
@@ -43,6 +44,7 @@ from orchestrator.records.task_registry import load_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
+from orchestrator.scheduling.run_plan import format_step, run_plan as work_through_plan
 from orchestrator.scheduling.plan_progress import (
     format_plan_progress, plan_progress, process_liveness,
 )
@@ -201,9 +203,31 @@ def build_parser() -> argparse.ArgumentParser:
              "same worktree with its files kept, with fresh agents.",
     )
     run_task_parser.add_argument(
+        "--retry", dest="retry_task", action="store_true",
+        help="Retry a failed task once, on a fresh worktree, telling the builder what the "
+             "checks found. run-plan does this by itself.",
+    )
+    run_task_parser.add_argument(
         "--background", action="store_true",
         help="Start the task as its own process and return at once; watch it with "
              "status or dashboard. It keeps running if this window closes.",
+    )
+
+    run_plan_parser = subparsers.add_parser(
+        "run-plan",
+        help="Run the plan's tasks one at a time until it is complete or a task needs a "
+             "person; commits locally, never pushes.",
+    )
+    run_plan_parser.add_argument("run_id", help="Run ID the plan was stored under.")
+    run_plan_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_plan_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run_plan_parser.add_argument(
+        "--repo-path", type=Path, default=PROJECT_ROOT,
+        help="Local checkout to create the worktrees from.",
+    )
+    run_plan_parser.add_argument(
+        "--worktree-root", type=Path, default=None,
+        help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
     )
 
     budget_parser = subparsers.add_parser(
@@ -330,12 +354,25 @@ def run_show_plan(args: argparse.Namespace) -> int:
 def run_run_task(args: argparse.Namespace) -> int:
     plan = load_task_plan(args.plans_dir, args.run_id)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
-    if args.background and args.continue_task:
-        print("--continue runs in this window for now (run-plan will continue tasks in the "
-              "background). Run it again without --background.", file=sys.stderr)
+    if args.continue_task and args.retry_task:
+        print("Use --continue for a stopped task or --retry for a failed one, not both.",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if args.background and (args.continue_task or args.retry_task):
+        print("--continue and --retry run in this window for now. Run it again without "
+              "--background.", file=sys.stderr)
         return EXIT_USAGE
     if args.background:
         return run_task_in_background(args)
+    if args.retry_task:
+        print(f"Retrying {args.task_id} of run {args.run_id} on a fresh worktree; fresh agents "
+              "call Claude and may take a while...", file=sys.stderr)
+        record = retry_task(args.run_id, args.task_id, plans_dir=args.plans_dir,
+                            runs_dir=args.runs_dir, repo_path=args.repo_path,
+                            worktree_root=args.worktree_root or default_worktree_root())
+        display_task(record)
+        print("\nNothing was pushed or merged.")
+        return {"done": EXIT_OK, "failed": EXIT_TASK_FAILED}.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
     if args.continue_task:
         print(f"Continuing {args.task_id} of run {args.run_id} from where it stopped; "
               "fresh agents call Claude and may take a while...", file=sys.stderr)
@@ -360,6 +397,38 @@ def run_run_task(args: argparse.Namespace) -> int:
         "done": EXIT_OK,
         "failed": EXIT_TASK_FAILED,
     }.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
+
+
+def run_run_plan(args: argparse.Namespace) -> int:
+    plan = load_task_plan(args.plans_dir, args.run_id)
+    verify_remote_repository(args.repo_path, plan["config"]["repository"])
+    print(f"Working through the plan of run {args.run_id}, one task at a time. Agents call "
+          "Claude, so this may take a long while. Ctrl+C stops it; run-plan again goes on "
+          "from where it stopped.", file=sys.stderr)
+
+    def show(action: str, task_id: str, step) -> None:
+        print(format_step(action, task_id, step), flush=True)
+
+    result = work_through_plan(
+        args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
+        repo_path=args.repo_path, worktree_root=args.worktree_root or default_worktree_root(),
+        on_step=show,
+    )
+    if result.progress is not None:
+        print("\n" + format_plan_progress(result.progress))
+    budget = format_budget(args.runs_dir, args.run_id)
+    if budget:
+        print(budget)
+    if result.complete:
+        print("\nThe plan is complete. Nothing was pushed or merged.")
+        return EXIT_OK
+    print(f"\nStopped: {result.stopped}")
+    print("Nothing was pushed or merged.")
+    if result.refused:
+        return EXIT_REFUSED
+    if result.steps and result.steps[-1].status == "failed":
+        return EXIT_TASK_FAILED
+    return EXIT_TASK_NEEDS_REVIEW
 
 
 def run_task_in_background(args: argparse.Namespace) -> int:
@@ -563,6 +632,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_show_plan(args)
         if args.command == "run-task":
             return run_run_task(args)
+        if args.command == "run-plan":
+            return run_run_plan(args)
         if args.command == "show-task":
             return run_show_task(args)
         if args.command == "cancel":
