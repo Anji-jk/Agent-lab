@@ -61,7 +61,11 @@ def retry_problem(record: dict[str, Any]) -> str | None:
         return (f"{task_id} failed before it had a worktree "
                 f"({(record.get('reasons') or ['no reason recorded'])[0]}); "
                 "trying again would meet the same problem.")
-    blocked = (record.get("findings") or {}).get("builder_blocked")
+    findings = record.get("findings") or {}
+    if findings.get("suite_timed_out") or findings.get("named_timed_out"):
+        return (f"{task_id}'s tests timed out; a retry would not make them faster. Raise "
+                "AGENT_LAB_TEST_TIMEOUT or make the tests faster, and a person should look.")
+    blocked = findings.get("builder_blocked")
     if blocked:
         return (f"The builder said {task_id} cannot be done ({blocked}); a retry would "
                 "be given the same task, so a person should look.")

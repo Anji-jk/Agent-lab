@@ -364,6 +364,9 @@ class Findings:
     tester_notes: list[str] = field(default_factory=list)       # recorded, never fail
     suite_passed: bool | None = None
     named_passed: bool | None = None
+    suite_timed_out: bool = False   # stopped at the time limit: nothing was reported failing
+    named_timed_out: bool = False
+    test_timeout_seconds: int | None = None
     reviewer_ok: bool | None = None
     reviewer_verdict: str | None = None
     unmet: list[int] = field(default_factory=list)
@@ -404,15 +407,23 @@ def problems(findings: Findings) -> list[str]:
     if f.suspected_defects:
         reasons.append("The tester suspects defects: " + "; ".join(f.suspected_defects))
     if f.suite_passed is False:
-        reasons.append("The full test suite fails.")
+        reasons.append(_timed_out("The full test suite", f) if f.suite_timed_out
+                       else "The full test suite fails.")
     if f.named_passed is False:
-        reasons.append("The tester's named tests fail.")
+        reasons.append(_timed_out("The tester's named tests", f) if f.named_timed_out
+                       else "The tester's named tests fail.")
     if f.reviewer_verdict == "fail":
         reasons.append("The reviewer's verdict is fail.")
     if f.unmet:
         reasons.append("The reviewer found criteria unmet: " + ", ".join(str(n) for n in f.unmet))
     reasons += [f"Reviewer: {problem}" for problem in f.reviewer_problems]
     return reasons
+
+
+def _timed_out(what: str, f: Findings) -> str:
+    limit = f"{f.test_timeout_seconds} s" if f.test_timeout_seconds else "the time limit"
+    return (f"{what} did not finish within {limit}: it timed out, and no test was reported "
+            "failing. Raise AGENT_LAB_TEST_TIMEOUT or make the tests faster.")
 
 
 def decide(findings: Findings) -> tuple[str, list[str]]:

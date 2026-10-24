@@ -24,6 +24,7 @@ from orchestrator.cli.display import (
 )
 from orchestrator.errors import ApprovalRequired, ExecutionRefused
 from orchestrator.execution.background import start_task_in_background
+from orchestrator.execution.budget import format_budget, remove_budget, set_budget
 from orchestrator.execution.cancel import cancel_task
 from orchestrator.execution.continuing import continue_task
 from orchestrator.legacy.executor import execute_plan
@@ -205,6 +206,17 @@ def build_parser() -> argparse.ArgumentParser:
              "status or dashboard. It keeps running if this window closes.",
     )
 
+    budget_parser = subparsers.add_parser(
+        "budget",
+        help="Show, set or remove a run's spending limit for all its tasks. No AI calls.",
+    )
+    budget_parser.add_argument("run_id")
+    budget_change = budget_parser.add_mutually_exclusive_group()
+    budget_change.add_argument("--set", type=float, metavar="USD", dest="limit",
+                               help="The most the run's task agents may spend in total.")
+    budget_change.add_argument("--remove", action="store_true", help="Remove the limit.")
+    budget_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
     cancel_parser = subparsers.add_parser(
         "cancel",
         help="Stop a running task and everything it started; the worktree is kept.",
@@ -367,6 +379,20 @@ def run_task_in_background(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def run_budget(args: argparse.Namespace) -> int:
+    if args.limit is not None:
+        set_budget(args.runs_dir, args.run_id, args.limit)
+        print(f"Set the budget of run {args.run_id} to ${args.limit:.2f}.")
+    elif args.remove:
+        removed = remove_budget(args.runs_dir, args.run_id)
+        print(f"Removed the budget of run {args.run_id}." if removed
+              else f"Run {args.run_id} had no budget.")
+        return EXIT_OK
+    line = format_budget(args.runs_dir, args.run_id)
+    print(line or f"Run {args.run_id} has no budget: only each agent's own cap limits it.")
+    return EXIT_OK
+
+
 def run_cancel(args: argparse.Namespace) -> int:
     result = cancel_task(args.run_id, args.task_id, runs_dir=args.runs_dir)
     print(f"Cancelled {args.task_id} of run {args.run_id}.")
@@ -400,6 +426,9 @@ def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
         return any(task.active_role for task in tasks)
     progress = plan_progress(load_task_plan(plans_dir, run_id), runs_dir, run_id)
     print("\n" + format_plan_progress(progress))
+    budget = format_budget(runs_dir, run_id)
+    if budget:
+        print(budget)
     # An interrupted task's record still says "testing"; only a live process counts.
     return progress.state == "running"
 
@@ -538,6 +567,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_show_task(args)
         if args.command == "cancel":
             return run_cancel(args)
+        if args.command == "budget":
+            return run_budget(args)
         if args.command == "status":
             return run_status_command(args)
         if args.command == "events":

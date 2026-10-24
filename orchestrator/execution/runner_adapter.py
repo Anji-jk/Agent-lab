@@ -29,7 +29,7 @@ DEFAULT_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "claude_runner.py"
 # Extra seconds beyond the runner's own timeout before we give up on it.
 OUTER_TIMEOUT_GRACE = 120
 
-Outcome = Literal["success", "failure", "timeout", "launch_error"]
+Outcome = Literal["success", "failure", "timeout", "launch_error", "not_started"]
 
 # Result fields worth keeping in orchestration records. Deliberately
 # excludes result_text, claude_result_event and the recorded command.

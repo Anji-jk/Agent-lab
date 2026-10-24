@@ -1,6 +1,7 @@
+"""The task pipeline: the good path, broken tasks, ordering, the suite's Python, one branch per run, timeouts."""
+
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -10,159 +11,18 @@ from orchestrator.execution import checks as tc
 from orchestrator.execution import task_runner as tr
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution.runner_adapter import RunnerOutcome
-from orchestrator.planning.plan_file import save_task_plan
 from orchestrator.records.task_registry import list_tasks, load_task
-
-RUN_ID = "run1"
-GOOD_DOUBLE = "def double(x):\n    return x * 2\n"
-GOOD_TRIPLE = "def triple(x):\n    return x * 3\n"
-
-TESTS_DOUBLE = (
-    "from calc import double\n\n\n"
-    "def test_positive():\n    assert double(2) == 4\n\n\n"
-    "def test_negative():\n    assert double(-1) == -2\n"
+from task_runner_support import (
+    RUN_ID,
+    add_task,
+    assert_main_untouched,
+    git,
+    orchestrator_steps,
+    prepare,
+    run,
+    task,
+    use_note,
 )
-TESTS_TRIPLE = "from calc import triple\n\n\ndef test_triple():\n    assert triple(2) == 6\n"
-
-
-def git(path, *args):
-    return subprocess.run(
-        ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-
-
-def task(task_id, title, criteria, depends=(), files=("calc.py",)):
-    return {
-        "id": task_id, "title": title, "description": f"Do {title}",
-        "depends_on": list(depends), "expected_outcome": "it works", "files": list(files),
-        "verification": [], "acceptance_criteria": list(criteria),
-        "complexity": "small", "parallel_safe": False,
-    }
-
-
-@pytest.fixture
-def world(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
-    (repo / "conftest.py").write_text("")
-    # Like the real repository: test runs create folders that .gitignore ignores.
-    (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.py[cod]\n")
-    (repo / "README.md").write_text("docs\n")
-    (repo / "tests").mkdir()
-    (repo / "tests" / "test_add.py").write_text(
-        "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
-    )
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", "init")
-    base = git(repo, "rev-parse", "HEAD")
-
-    plans, runs = tmp_path / "plans", tmp_path / "runs"
-    save_task_plan(plans, RUN_ID, {
-        "issue": {"repository": "o/r", "number": 7, "title": "Add helpers",
-                  "url": "u", "description": "Add double and triple."},
-        "config": {"repository": "o/r", "base_ref": "main", "base_commit": base,
-                   "model": None, "timeout_seconds": 60, "run_id": RUN_ID,
-                   "branch": "b", "worktree_path": "w"},
-        "summary": "s",
-        "tasks": [
-            task("T1", "double", ["double(2) is 4", "double(-1) is -2"]),
-            task("T2", "triple", ["triple(2) is 6"], depends=["T1"]),
-        ],
-        "planner": {"run_id": f"{RUN_ID}-plan"},
-    })
-    return {"repo": repo, "base": base, "plans": plans, "runs": runs,
-            "wt": tmp_path / "wt", "script": Path(__file__)}
-
-
-class FakeAgents:
-    """Stands in for the runner. One behaviour per role; records every call."""
-
-    def __init__(self, repo_base_dir):
-        self.calls: list[dict] = []
-        self.prompts: dict[str, str] = {}
-        self.behaviour = {"builder": self.build_double, "tester": self.test_double,
-                          "reviewer": self.review_pass}
-        self.fail = {}  # role -> RunnerOutcome to return instead
-        self.passed_roles: list = []  # the role argument each agent was started with
-
-    # -- default behaviours: each returns the agent's final text --
-    def build_double(self, cwd):
-        with open(cwd / "calc.py", "a") as handle:
-            handle.write("\n" + GOOD_DOUBLE)
-        return json.dumps({"summary": "added double", "files_changed": ["calc.py"]})
-
-    def test_double(self, cwd):
-        (cwd / "tests" / "test_double.py").write_text(TESTS_DOUBLE)
-        return json.dumps({"summary": "tests", "coverage": [
-            {"criterion": 1, "tests": ["tests/test_double.py::test_positive"]},
-            {"criterion": 2, "tests": ["tests/test_double.py::test_negative"]}]})
-
-    def review_pass(self, cwd):
-        return json.dumps({"verdict": "pass", "problems": [], "criteria": [
-            {"criterion": 1, "met": True, "evidence": "calc.py"},
-            {"criterion": 2, "met": True, "evidence": "calc.py"}]})
-
-    def build_triple(self, cwd):
-        with open(cwd / "calc.py", "a") as handle:
-            handle.write("\n" + GOOD_TRIPLE)
-        return json.dumps({"summary": "added triple", "files_changed": ["calc.py"]})
-
-    def test_triple(self, cwd):
-        (cwd / "tests" / "test_triple.py").write_text(TESTS_TRIPLE)
-        return json.dumps({"coverage": [{"criterion": 1, "tests": ["tests/test_triple.py::test_triple"]}]})
-
-    def review_pass_one(self, cwd):
-        return json.dumps({"verdict": "pass", "criteria": [{"criterion": 1, "met": True}]})
-
-    def use_triple(self):
-        self.behaviour = {"builder": self.build_triple, "tester": self.test_triple,
-                          "reviewer": self.review_pass_one}
-
-    def __call__(self, **kwargs):
-        if kwargs.get("read_only"):
-            name = "reviewer"
-        elif any("tests/**" in rule for rule in kwargs.get("allowed_tools", ())):
-            name = "tester"
-        else:
-            name = "builder"
-        self.passed_roles.append(kwargs.get("role"))
-        self.calls.append({**{k: v for k, v in kwargs.items() if k != "prompt_file"}, "role": name})
-        self.prompts[name] = Path(kwargs["prompt_file"]).read_text(encoding="utf-8")
-        if name in self.fail:
-            return self.fail[name]
-        text = self.behaviour[name](Path(kwargs["worktree_path"]))
-        return RunnerOutcome("success", 0, None, {
-            "status": "succeeded", "result_text": text, "total_cost_usd": 0.1,
-            "num_turns": 3, "model": kwargs.get("model")})
-
-    @property
-    def roles(self):
-        return [call["role"] for call in self.calls]
-
-
-@pytest.fixture
-def agents(world):
-    return FakeAgents(world["repo"])
-
-
-def run(world, agents, task_id="T1", **overrides):
-    options = dict(plans_dir=world["plans"], runs_dir=world["runs"], repo_path=world["repo"],
-                   worktree_root=world["wt"], runner_script=world["script"],
-                   invoke_runner=agents, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-    options.update(overrides)
-    return tr.run_task(RUN_ID, task_id, **options)
-
-
-def assert_main_untouched(world):
-    assert git(world["repo"], "rev-parse", "HEAD") == world["base"]
-    assert git(world["repo"], "status", "--porcelain") == ""
-    assert "double" not in (world["repo"] / "calc.py").read_text()
-
-
-# --- the good path ---------------------------------------------------------------
 
 
 def test_good_task_ends_as_a_verified_local_commit(world, agents):
@@ -215,9 +75,6 @@ def test_prompts_contain_the_issue_task_and_the_diff(world, agents):
     assert "calc.py" in agents.prompts["tester"]
     assert "+def double" in agents.prompts["reviewer"]
     assert "Full test suite: passed" in agents.prompts["reviewer"]
-
-
-# --- a broken task is caught -------------------------------------------------------
 
 
 def test_sabotaged_code_is_caught_and_not_committed(world, agents):
@@ -371,9 +228,6 @@ def test_reviewer_that_skips_criteria_is_not_done(world, agents, criteria):
     assert "did not judge criteria" in record["reasons"][0]
 
 
-# --- the run itself breaks -------------------------------------------------------------
-
-
 @pytest.mark.parametrize("role", ["builder", "tester", "reviewer"])
 def test_agent_crash_needs_review(world, agents, role):
     agents.fail[role] = RunnerOutcome("failure", 1, "Claude exited with code 1", {})
@@ -408,9 +262,6 @@ def test_test_command_that_hangs_is_cut_off(world, agents, monkeypatch):
     monkeypatch.setattr(tr, "TEST_TIMEOUT_SECONDS", 1)
     record = run(world, agents, test_command=(sys.executable, "-c", "import time; time.sleep(30)"))
     assert record["status"] == "failed" and record["checks"]["suite"]["timed_out"]
-
-
-# --- ordering and refusals -----------------------------------------------------------------
 
 
 def test_dependent_task_waits_for_its_dependency(world, agents):
@@ -483,15 +334,6 @@ def test_check_environment_removes_credentials(monkeypatch):
                    "PYTHONDONTWRITEBYTECODE": "1"}
 
 
-# --- M3.3: the orchestrator's own event log -----------------------------------------
-
-
-def orchestrator_steps(world, task_id="T1"):
-    from orchestrator.records.task_events import task_events_path
-    path = task_events_path(world["runs"], RUN_ID, task_id)
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
 def test_a_good_task_logs_every_orchestrator_step_in_order(world, agents):
     record = run(world, agents)
     entries = orchestrator_steps(world)
@@ -549,9 +391,6 @@ def test_a_log_that_cannot_be_written_does_not_stop_the_task(world, agents, monk
     assert record["status"] == "done"
 
 
-# --- the suite's Python is checked before anything is paid for (M3.8) -----------------------
-
-
 def test_a_python_without_pytest_is_refused_before_any_agent_runs(world, agents, monkeypatch):
     monkeypatch.setattr(tc, "pytest_problem", lambda python, env=None: "No module named pytest")
     with pytest.raises(ExecutionRefused, match="pytest is not available"):
@@ -569,37 +408,6 @@ def test_the_checks_environment_puts_the_projects_python_first_on_path(monkeypat
     env = tr.check_environment(Path("runner.py"))
     folder = str(Path(tc.project_python()).parent)
     assert env["PATH"].split(os.pathsep) == [folder, "elsewhere"]
-
-
-# --- M4.2: one branch for the run ------------------------------------------------------------
-
-
-def add_task(world, new_task):
-    path = world["plans"] / RUN_ID / "plan.json"
-    data = json.loads(path.read_text())
-    data["tasks"].append(new_task)
-    path.write_text(json.dumps(data))
-
-
-def build_note(cwd):
-    (cwd / "notes.py").write_text("NOTE = 1\n")
-    return json.dumps({"summary": "added a note", "files_changed": ["notes.py"]})
-
-
-def write_note_tests(cwd):
-    (cwd / "tests" / "test_notes.py").write_text("from notes import NOTE\n\n\ndef test_note():\n    assert NOTE == 1\n")
-    return json.dumps({"coverage": [{"criterion": 1, "tests": ["tests/test_notes.py::test_note"]}]})
-
-
-def use_note(agents):
-    agents.behaviour = {"builder": build_note, "tester": write_note_tests,
-                        "reviewer": agents.review_pass_one}
-
-
-@pytest.fixture
-def with_independent(world):
-    add_task(world, task("T3", "note", ["NOTE is 1"], files=("notes.py",)))
-    return world
 
 
 def test_an_independent_task_starts_from_the_last_finished_commit(with_independent, agents):
@@ -690,11 +498,6 @@ def test_a_finished_commit_that_is_missing_is_refused(world, agents):
         run(world, agents, task_id="T2")
 
 
-def prepare(world, task_id, is_alive):
-    return tr.prepare(RUN_ID, task_id, plans_dir=world["plans"], runs_dir=world["runs"],
-                      repo_path=world["repo"], is_alive=is_alive)
-
-
 @pytest.mark.parametrize("status", ["pending", "building", "testing", "reviewing"])
 def test_a_task_is_refused_while_another_task_of_the_run_is_running(with_independent, status):
     from orchestrator.records.task_registry import save_task
@@ -728,366 +531,31 @@ def test_finished_tasks_are_not_checked_for_a_process(with_independent, agents):
 
     assert prepare(world, "T3", alive).task["id"] == "T3"
 
-# --- M4.4: retry once, with the findings -------------------------------------------------------
 
-
-def wrong_double(cwd):
-    with open(cwd / "calc.py", "a") as handle:
-        handle.write("\ndef double(x):\n    return x + 2\n")  # double(-1) is 1, not -2
-    return json.dumps({"summary": "added double", "files_changed": ["calc.py"]})
-
-
-def retry(world, agents, task_id="T1", **overrides):
+def test_a_suite_that_times_out_says_so_and_is_not_retried(world, agents, monkeypatch):
     from orchestrator.execution import retry as rt
-    options = dict(plans_dir=world["plans"], runs_dir=world["runs"], repo_path=world["repo"],
-                   worktree_root=world["wt"], runner_script=world["script"],
-                   invoke_runner=agents, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-    options.update(overrides)
-    return rt.retry_task(RUN_ID, task_id, **options)
+    monkeypatch.setattr(tr, "TEST_TIMEOUT_SECONDS", 1)
+    record = run(world, agents, test_command=(sys.executable, "-c", "import time; time.sleep(30)"))
+    assert record["status"] == "failed" and record["findings"]["suite_timed_out"] is True
+    assert any("did not finish within 1 s: it timed out, and no test was reported failing" in r
+               for r in record["reasons"])
+    assert not any(r == "The full test suite fails." for r in record["reasons"])
+    assert "timed out; a retry would not make them faster" in (rt.retry_problem(record) or "")
 
 
-def task_folder(world, task_id="T1"):
-    return world["runs"] / RUN_ID / "tasks" / task_id
+def test_the_test_time_limit_can_be_set(monkeypatch):
+    monkeypatch.delenv(tr.TEST_TIMEOUT_VARIABLE, raising=False)
+    assert tr.test_timeout_seconds() == tr.TEST_TIMEOUT_SECONDS == 1200
+    monkeypatch.setenv(tr.TEST_TIMEOUT_VARIABLE, "3600")
+    assert tr.test_timeout_seconds() == 3600
+    for bad in ("ten", "59", "86401"):
+        monkeypatch.setenv(tr.TEST_TIMEOUT_VARIABLE, bad)
+        with pytest.raises(ExecutionRefused, match="AGENT_LAB_TEST_TIMEOUT"):
+            tr.test_timeout_seconds()
 
 
-def test_a_task_that_fails_once_then_passes(world, agents):
-    agents.behaviour["builder"] = wrong_double
-    first = run(world, agents)
-    assert first["status"] == "failed"
-    agents.behaviour["builder"] = agents.build_double
-    agents.calls.clear()
-
-    second = retry(world, agents)
-    assert second["status"] == "done", second["reasons"]
-    assert second["attempt"] == 2 and second["commit"]
-    # A fresh worktree and branch, from the same head the first attempt started from.
-    assert second["base_commit"] == first["base_commit"] == world["base"]
-    assert second["branch"] == first["branch"] + "-r2"
-    assert second["worktree_path"] != first["worktree_path"]
-    assert Path(first["worktree_path"]).is_dir()  # the first attempt's worktree is kept
-    # Its own agents, so the first attempt's runner folders stay as they were.
-    assert [c["run_id"] for c in agents.calls] == [
-        f"{RUN_ID}-T1-r2-builder", f"{RUN_ID}-T1-r2-tester", f"{RUN_ID}-T1-r2-reviewer"]
-    # The builder was told what went wrong.
-    prompt = agents.prompts["builder"]
-    assert "Problems found by an earlier attempt" in prompt
-    assert first["reasons"][0][:60] in prompt
-    assert "clean checkout" in prompt
-
-
-def test_each_attempt_keeps_its_own_record_and_cost(world, agents):
-    agents.behaviour["builder"] = wrong_double
-    first = run(world, agents)
-    agents.behaviour["builder"] = agents.build_double
-    second = retry(world, agents)
-    archived = json.loads((task_folder(world) / "attempt-1" / "task.json").read_text())
-    assert archived["status"] == "failed" and archived["cost_usd"] == first["cost_usd"]
-    assert (task_folder(world) / "attempt-1" / "events.jsonl").is_file()
-    assert second["previous_attempts"] == [{
-        "attempt": 1, "status": "failed", "reasons": first["reasons"],
-        "cost_usd": first["cost_usd"], "branch": first["branch"],
-        "worktree_path": first["worktree_path"], "base_commit": first["base_commit"],
-        "finished_at": first["updated_at"]}]
-    assert second["cost_usd"] == pytest.approx(0.3)  # this attempt's own three agents
-    steps = [e["step"] for e in orchestrator_steps(world)]
-    assert steps[0] == "task_started" and steps.count("task_started") == 1  # a fresh log
-
-
-def test_a_task_that_fails_twice_stays_failed(world, agents):
-    from orchestrator.errors import ExecutionRefused as Refused
-    agents.behaviour["builder"] = wrong_double
-    run(world, agents)
-    second = retry(world, agents)
-    assert second["status"] == "failed" and second["attempt"] == 2 and second["commit"] is None
-    with pytest.raises(Refused, match="already been retried"):
-        retry(world, agents)
-    assert load_task(world["runs"], RUN_ID, "T1")["status"] == "failed"
-    # Its dependent is blocked, as for any failed task.
-    with pytest.raises(tr.TaskNotReady, match="T1 is failed, not done"):
-        run(world, agents, task_id="T2")
-
-
-@pytest.mark.parametrize("make,expected", [
-    ("done", "only a failed task is retried"),
-    ("needs_review", "A person should look"),
-    ("blocked", "cannot be done .no API"),
-    ("no_worktree", "failed before it had a worktree"),
-])
-def test_tasks_that_are_not_retried(world, agents, make, expected):
-    if make == "needs_review":
-        agents.fail["builder"] = RunnerOutcome("failure", 1, "Claude exited with code 1", {})
-    elif make == "blocked":
-        agents.behaviour["builder"] = lambda cwd: json.dumps({"blocked": True, "blocker": "no API"})
-    record = run(world, agents, worktree_root=world["repo"] / "inside") if make == "no_worktree" \
-        else run(world, agents)
-    calls = len(agents.calls)
-    with pytest.raises(ExecutionRefused, match=expected):
-        retry(world, agents)
-    assert len(agents.calls) == calls  # nothing was paid for
-    assert load_task(world["runs"], RUN_ID, "T1") == record  # and nothing moved
-    assert not (task_folder(world) / "attempt-1").exists()
-
-
-def test_a_task_that_never_ran_cannot_be_retried(world, agents):
-    from orchestrator.records.run_registry import RunRegistryError
-    with pytest.raises(RunRegistryError):
-        retry(world, agents)
-
-
-def test_a_refused_retry_leaves_the_failed_attempt_in_place(world, agents, monkeypatch):
-    agents.behaviour["builder"] = wrong_double
+def test_the_test_time_limit_reaches_the_suite(world, agents, monkeypatch):
+    monkeypatch.setenv(tr.TEST_TIMEOUT_VARIABLE, "90")
     record = run(world, agents)
-    monkeypatch.setattr(tc, "pytest_problem", lambda *args, **kwargs: "No module named pytest")
-    with pytest.raises(ExecutionRefused):
-        retry(world, agents, test_command=None)
-    assert load_task(world["runs"], RUN_ID, "T1") == record
-    assert not (task_folder(world) / "attempt-1").exists()
-
-
-def test_a_retry_that_cannot_start_puts_the_first_attempt_back(world, agents, monkeypatch):
-    agents.behaviour["builder"] = wrong_double
-    record = run(world, agents)
-
-    def explode(*args, **kwargs):
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(tr, "run_task", explode)
-    with pytest.raises(OSError):
-        retry(world, agents)
-    assert load_task(world["runs"], RUN_ID, "T1") == record
-    assert (task_folder(world) / "events.jsonl").is_file()
-    assert not (task_folder(world) / "attempt-1").exists()
-
-
-def test_the_feedback_names_the_failures_and_hides_secrets():
-    from orchestrator.execution import retry as rt
-    record = {
-        "task_id": "T1", "status": "failed",
-        "reasons": ["The full test suite failed.", "Reviewer: double(-1) returns 1"],
-        "checks": {
-            "suite": {"exit_code": 1, "timed_out": False,
-                      "output_tail": "FAILED tests/test_double.py::test_negative\n"
-                                     "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
-                                     "1 failed, 4 passed"},
-            "named_tests": {"exit_code": 0, "timed_out": False, "output_tail": "2 passed"},
-        },
-    }
-    text = rt.retry_feedback(record)
-    assert text.startswith("Attempt 1 of this task")
-    assert "- The full test suite failed." in text and "- Reviewer: double(-1) returns 1" in text
-    assert "The end of the full test suite output:" in text and "1 failed, 4 passed" in text
-    assert "tests the tester named" not in text  # it passed, so it is not repeated
-    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in text
-
-
-def test_the_feedback_says_when_the_tests_timed_out_and_cuts_long_text():
-    from orchestrator.execution import retry as rt
-    record = {"task_id": "T1", "status": "failed", "reasons": ["x" * 2000] * 20,
-              "checks": {"suite": {"exit_code": None, "timed_out": True, "output_tail": ""}}}
-    text = rt.retry_feedback(record)
-    assert "(it timed out)" in text and "(no output)" in text
-    assert "... and 8 more" in text
-    assert max(len(line) for line in text.splitlines()) <= rt.REASON_CHARS + 2
-
-
-def test_agent_ids_and_the_status_follow_the_attempt(world, agents, monkeypatch):
-    from orchestrator.monitoring import progress
-    assert progress.agent_run_id("r", "T1", "builder") == "r-T1-builder"
-    assert progress.agent_run_id("r", "T1", "builder", 2) == "r-T1-r2-builder"
-    assert progress.attempt_of({}) == 1 and progress.attempt_of({"attempt": 2}) == 2
-    agents.behaviour["builder"] = wrong_double
-    run(world, agents)
-    second = retry(world, agents)
-    from orchestrator.execution.runner_adapter import runner_run_directory
-    folder = runner_run_directory(f"{RUN_ID}-T1-r2-builder", world["script"])
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "progress.json").write_text(json.dumps(
-        {"state": "finished", "status": "succeeded", "turns": 4, "total_cost_usd": 0.5}))
-    from datetime import datetime, timezone
-    view = progress.task_agent_view(RUN_ID, "T1", "builder", second, world["script"],
-                                    datetime.now(timezone.utc))
-    assert view.turns == 4 and view.cost_usd == 0.5  # attempt 2's builder, not attempt 1's
-
-
-def test_show_task_lists_the_earlier_attempt(world, agents, capsys):
-    from orchestrator.cli.display import display_task
-    agents.behaviour["builder"] = wrong_double
-    run(world, agents)
-    agents.behaviour["builder"] = agents.build_double
-    display_task(retry(world, agents))
-    out = capsys.readouterr().out
-    assert "Attempt 1: failed, $" in out
-    assert "This is attempt 2 (a retry, told what attempt 1 got wrong)." in out
-
-# --- M4.5: continue a stopped task from its stage ----------------------------------------------
-
-
-class Stop(BaseException):
-    """Like a killed process: escapes the pipeline, leaving the record at its stage."""
-
-
-def gone(task_id, record):
-    return False, "its process is no longer running"
-
-
-def stopping(work=None):
-    def behaviour(cwd):
-        if work:
-            work(cwd)
-        raise Stop()
-    return behaviour
-
-
-def stop_at(world, agents, role, work=None):
-    """Run T1 until ``role`` starts, then stop it there."""
-    real = agents.behaviour[role]
-    agents.behaviour[role] = stopping(work)
-    with pytest.raises(Stop):
-        run(world, agents)
-    agents.behaviour[role] = real
-    agents.calls.clear()
-    return load_task(world["runs"], RUN_ID, "T1")
-
-
-def resume(world, agents, **overrides):
-    from orchestrator.execution import continuing
-    options = dict(plans_dir=world["plans"], runs_dir=world["runs"], repo_path=world["repo"],
-                   runner_script=world["script"], invoke_runner=agents, is_alive=gone,
-                   env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-    options.update(overrides)
-    return continuing.continue_task(RUN_ID, "T1", **options)
-
-
-def test_a_task_interrupted_while_testing_continues_with_a_new_tester(world, agents):
-    stopped = stop_at(world, agents, "tester")
-    assert stopped["status"] == "testing" and stopped["checkpoint"]["stage"] == "testing"
-    record = resume(world, agents)
-    assert record["status"] == "done", record["reasons"]
-    assert agents.roles == ["tester", "reviewer"]  # the builder's checked result was kept
-    assert [c["run_id"] for c in agents.calls] == [f"{RUN_ID}-T1-r2-tester", f"{RUN_ID}-T1-r2-reviewer"]
-    # Same worktree and branch; the commit holds the first builder's change.
-    assert record["branch"] == stopped["branch"] and record["worktree_path"] == stopped["worktree_path"]
-    assert record["attempt"] == 2 and record["continued_at"] == "testing"
-    assert [h["status"] for h in record["history"]] == ["testing", "reviewing", "done"]
-    assert set(record["reused_agents"]) == {"builder"} and set(record["agents"]) == {"tester", "reviewer"}
-    assert "def double" in git(Path(record["worktree_path"]), "show", "HEAD:calc.py")
-    assert record["previous_attempts"][0]["status"] == "interrupted"
-
-
-def test_a_cancelled_task_continues_too(world, agents):
-    from orchestrator.records.task_registry import update_task
-    stop_at(world, agents, "tester")
-    update_task(world["runs"], RUN_ID, "T1", {"status": "cancelled", "reasons": ["Cancelled by you."]})
-    record = resume(world, agents)
-    assert record["status"] == "done" and agents.roles == ["tester", "reviewer"]
-    assert record["previous_attempts"][0]["status"] == "cancelled"
-    assert record["previous_attempts"][0]["reasons"] == ["Cancelled by you."]
-
-
-def test_a_task_stopped_while_reviewing_only_needs_a_new_reviewer(world, agents):
-    stopped = stop_at(world, agents, "reviewer")
-    assert stopped["checkpoint"]["stage"] == "reviewing"
-    record = resume(world, agents)
-    assert record["status"] == "done" and agents.roles == ["reviewer"]
-    assert set(record["reused_agents"]) == {"builder", "tester"}
-    steps = [e["step"] for e in orchestrator_steps(world)]
-    assert "suite_started" not in steps  # the tests' results were kept, not run again
-
-
-def test_files_changed_after_the_tests_ran_mean_the_tests_run_again(world, agents):
-    stopped = stop_at(world, agents, "reviewer")
-    Path(stopped["worktree_path"], "tests", "test_extra.py").write_text("def test_x():\n    pass\n")
-    record = resume(world, agents)
-    assert agents.roles == ["tester", "reviewer"] and record["continued_at"] == "testing"
-
-
-def test_a_task_stopped_while_building_gets_a_builder_told_what_is_there(world, agents):
-    stopped = stop_at(world, agents, "builder", work=lambda cwd: (cwd / "calc.py").write_text(
-        (cwd / "calc.py").read_text() + "\n" + GOOD_DOUBLE))
-    assert "checkpoint" not in stopped
-    record = resume(world, agents)
-    assert agents.roles == ["builder", "tester", "reviewer"] and record["continued_at"] == "building"
-    prompt = agents.prompts["builder"]
-    assert "About this worktree" in prompt and "changed files: calc.py" in prompt
-    assert "Problems found by an earlier attempt" not in prompt  # not a retry
-
-
-def test_a_record_from_before_checkpoints_continues_from_the_builder(world, agents):
-    from orchestrator.records.task_registry import update_task
-    stop_at(world, agents, "tester")
-    update_task(world["runs"], RUN_ID, "T1", {"checkpoint": None})
-    record = resume(world, agents)
-    assert agents.roles == ["builder", "tester", "reviewer"] and record["status"] == "done"
-
-
-@pytest.mark.parametrize("setup,expected", [
-    ("running", "still running"),
-    ("failed", "failed. Only a cancelled or interrupted task is continued; a failed one is retried"),
-    ("done", "done. Only a cancelled or interrupted task"),
-    ("no_worktree", "worktree .* no longer exists"),
-])
-def test_tasks_that_are_not_continued(world, agents, setup, expected):
-    import shutil
-    if setup in ("failed", "done"):
-        if setup == "failed":
-            agents.behaviour["builder"] = wrong_double
-        run(world, agents)
-    else:
-        stopped = stop_at(world, agents, "tester")
-        if setup == "no_worktree":
-            shutil.rmtree(stopped["worktree_path"])
-    record = load_task(world["runs"], RUN_ID, "T1")
-    alive = (lambda task_id, rec: (True, "process 7 is running it")) if setup == "running" else gone
-    calls = len(agents.calls)
-    with pytest.raises(ExecutionRefused, match=expected):
-        resume(world, agents, is_alive=alive)
-    assert len(agents.calls) == calls and load_task(world["runs"], RUN_ID, "T1") == record
-    assert not (task_folder(world) / "attempt-1").exists()
-
-
-def test_a_task_is_not_continued_once_the_run_has_moved_on(with_independent, agents):
-    world = with_independent
-    stop_at(world, agents, "tester")  # T1 stopped; its process is gone
-    use_note(agents)
-    other = run(world, agents, task_id="T3")  # T3 starts from the plan's base and finishes
-    assert other["status"] == "done"
-    with pytest.raises(tr.TaskNotReady, match="moved on"):
-        resume(world, agents)
-    assert not (task_folder(world) / "attempt-1").exists()
-
-
-def test_continuing_does_not_use_up_the_retry(world, agents):
-    agents.behaviour["builder"] = wrong_double
-    stop_at(world, agents, "tester")
-    failed = resume(world, agents)  # attempt 2: the wrong double fails the tests
-    assert failed["status"] == "failed" and failed["attempt"] == 2
-    agents.behaviour["builder"] = agents.build_double
-    third = retry(world, agents)
-    assert third["status"] == "done" and third["attempt"] == 3
-    assert third["branch"].endswith("-r3")
-    assert [p["status"] for p in third["previous_attempts"]] == ["interrupted", "failed"]
-
-
-def test_run_task_continue_cannot_run_in_the_background(world, monkeypatch, capsys):
-    import orchestrator.cli.commands as cli
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *args: None)
-    code = cli.main(["run-task", RUN_ID, "T1", "--continue", "--background",
-                     "--plans-dir", str(world["plans"]), "--runs-dir", str(world["runs"]),
-                     "--repo-path", str(world["repo"])])
-    assert code == cli.EXIT_USAGE and "without --background" in capsys.readouterr().err
-
-
-def test_show_task_says_what_was_kept(world, agents, capsys):
-    from orchestrator.cli.display import display_task
-    stop_at(world, agents, "tester")
-    display_task(resume(world, agents))
-    out = capsys.readouterr().out
-    assert "-> kept from the stopped attempt" in out
-    assert "the stopped attempt 1 continued from testing, in the same worktree" in out
-
-
-def test_show_task_of_a_stopped_task_does_not_say_its_agents_never_ran(world, agents, capsys):
-    from orchestrator.cli.display import display_task
-    display_task(stop_at(world, agents, "tester"))
-    out = capsys.readouterr().out
-    assert "-> not run" not in out and "no result recorded (the task was stopped)" in out
+    started = [e for e in orchestrator_steps(world) if e["step"] == "suite_started"]
+    assert started[0]["timeout_seconds"] == 90 and record["findings"]["test_timeout_seconds"] == 90

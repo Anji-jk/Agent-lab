@@ -27,6 +27,7 @@ from orchestrator.execution import runner_adapter
 from orchestrator.execution import agents as ta
 
 from orchestrator.execution import checks as tc
+from orchestrator.execution.budget import BudgetExhausted, budget_problem
 from orchestrator.errors import ExecutionRefused
 from orchestrator.planning.profiles import RoleSettings, profile_for, role_settings
 from orchestrator.execution.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER, TEST_DIR, role
@@ -42,6 +43,8 @@ from orchestrator.monitoring.progress import agent_run_id as attempt_agent_run_i
 TEST_DIRS = (f"{TEST_DIR}/",)
 # The full suite took 496 s in a worktree outside OneDrive on Windows (M2.8).
 TEST_TIMEOUT_SECONDS = 1200
+# Set this to give the tests longer on a slow machine (M4.6): seconds, 60 to 86400.
+TEST_TIMEOUT_VARIABLE = "AGENT_LAB_TEST_TIMEOUT"
 CREDENTIAL_VARIABLES = frozenset(
     {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"}
 )
@@ -64,6 +67,22 @@ class TaskContext:
     task: dict[str, Any]
     base_commit: str
     settings: dict[str, RoleSettings]
+
+
+def test_timeout_seconds() -> int:
+    """How long the orchestrator's own test runs may take: AGENT_LAB_TEST_TIMEOUT, or 1200."""
+    raw = os.environ.get(TEST_TIMEOUT_VARIABLE, "").strip()
+    if not raw:
+        return TEST_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ExecutionRefused(
+            f"{TEST_TIMEOUT_VARIABLE} must be a whole number of seconds, not {raw!r}."
+        ) from None
+    if not 60 <= value <= 86400:
+        raise ExecutionRefused(f"{TEST_TIMEOUT_VARIABLE} must be between 60 and 86400 seconds.")
+    return value
 
 
 def check_environment(runner_script: Path) -> dict[str, str]:
@@ -202,6 +221,8 @@ class _Pipeline:
         self.ctx, self.run_id, self.runs_dir = ctx, run_id, runs_dir
         self.attempt, self.feedback, self.earlier = attempt, feedback, earlier
         self.reused: dict[str, dict[str, Any]] = {}  # agents' results kept from the stopped attempt
+        self.test_timeout = TEST_TIMEOUT_SECONDS
+        self.budget_stopped = False
         self.log = log or NullLog()
         self.worktree, self.runner_script = worktree, runner_script
         self.invoke_runner, self.test_command, self.env = invoke_runner, test_command, env
@@ -226,6 +247,13 @@ class _Pipeline:
 
     def call(self, name: str, prompt: str) -> runner_adapter.RunnerOutcome:
         settings = self.ctx.settings[name]
+        problem = budget_problem(self.runs_dir, self.run_id, name, settings.max_budget_usd,
+                                 self.runner_script)
+        if problem:  # not started, so nothing was spent on it (M4.6)
+            self.budget_stopped = True
+            self.findings.infrastructure.append(problem)
+            self.log.emit("budget_stop", role=name, reason=problem)
+            return runner_adapter.RunnerOutcome("not_started", None, problem, {})
         agent_run_id = attempt_agent_run_id(self.run_id, self.task["id"], name, self.attempt)
         self.log.emit("agent_started", role=name, agent_run_id=agent_run_id,
                       settings=settings.describe())
@@ -270,9 +298,9 @@ class _Pipeline:
 
     def suite(self) -> tc.CommandResult:
         self.log.emit("suite_started", command=list(self.test_command),
-                      timeout_seconds=TEST_TIMEOUT_SECONDS)
+                      timeout_seconds=self.test_timeout)
         result = tc.run_suite(self.worktree, command=self.test_command,
-                              timeout=TEST_TIMEOUT_SECONDS, env=self.env)
+                              timeout=self.test_timeout, env=self.env)
         self.log.emit("suite_finished", **_command_fields(result))
         return result
 
@@ -289,7 +317,8 @@ class _Pipeline:
             "after_build": self.after_build,
             "checks": self.checks,
             "findings": {k: getattr(self.findings, k) for k in self.findings.__dataclass_fields__},
-            "agents": {**self.reused, **self.agents},
+            "agents": self.agents,  # this attempt's own agents (what it has spent)
+            "reused": self.reused,  # results kept from an earlier, stopped attempt
         }
         if next_stage == "reviewing":
             data["after_tests"] = tc.snapshot(self.worktree)
@@ -308,7 +337,8 @@ class _Pipeline:
         saved["uncovered"] = {int(k): v for k, v in (saved.get("uncovered") or {}).items()}
         fields = ta.Findings.__dataclass_fields__
         self.findings = ta.Findings(**{k: v for k, v in saved.items() if k in fields})
-        self.reused = dict(checkpoint.get("agents") or {})
+        # A 4.5 checkpoint had no "reused": its "agents" then held both.
+        self.reused = {**(checkpoint.get("reused") or {}), **(checkpoint.get("agents") or {})}
 
     # -- stages --
     def build(self) -> bool:
@@ -376,17 +406,20 @@ class _Pipeline:
 
         suite = self.suite()
         f.suite_passed = suite.passed
+        f.suite_timed_out = suite.timed_out
+        f.test_timeout_seconds = self.test_timeout
         self.checks["suite"] = suite.summary()
         if valid:
             self.log.emit("named_tests_started", tests=valid)
             result = tc.run_named_tests(self.worktree, valid, command=self.test_command,
-                                        timeout=TEST_TIMEOUT_SECONDS, env=self.env)
+                                        timeout=self.test_timeout, env=self.env)
             self.log.emit("named_tests_finished", **_command_fields(result))
             self.checks["named_tests"] = result.summary()
             # pytest exit 4 = a named file/test does not exist; 5 = nothing collected.
             if result.exit_code in (4, 5):
                 f.missing_tests = valid
             f.named_passed = result.passed
+            f.named_timed_out = result.timed_out
         else:
             f.named_passed = False if named else None
         return self.stopped()
@@ -471,6 +504,12 @@ def run_task(
         )
     if not Path(runner_script).is_file():
         raise ExecutionRefused(f"Runner script not found: {runner_script}")
+    test_timeout = test_timeout_seconds()
+    first = {"building": BUILDER, "testing": TESTER, "reviewing": REVIEWER}[start]
+    problem = budget_problem(runs_dir, run_id, first, ctx.settings[first].max_budget_usd,
+                             Path(runner_script))
+    if problem:  # refused before anything is created: the task stays as it was
+        raise BudgetExhausted(problem)
 
     env = check_environment(runner_script) if env is None else env
     test_command = tc.DEFAULT_TEST_COMMAND if test_command is None else test_command
@@ -521,6 +560,7 @@ def run_task(
     pipeline = _Pipeline(ctx, run_id, runs_dir, worktree, Path(runner_script),
                          invoke_runner, test_command, env, log, attempt, feedback,
                          (continue_from or {}).get("earlier"))
+    pipeline.test_timeout = test_timeout
     try:
         if start == "building":
             go = (pipeline.build() and pipeline.checkpoint("testing")
@@ -555,6 +595,7 @@ def run_task(
         "commit": commit,
         "agents": pipeline.agents,
         **({"reused_agents": pipeline.reused} if pipeline.reused else {}),
+        **({"budget_stop": True} if pipeline.budget_stopped else {}),
         "checks": pipeline.checks,
         "findings": {k: getattr(pipeline.findings, k) for k in pipeline.findings.__dataclass_fields__},
         "cost_usd": _total_cost(pipeline.agents),

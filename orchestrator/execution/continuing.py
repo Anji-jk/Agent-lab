@@ -10,6 +10,8 @@ starting at the stage it had reached, with fresh agents:
   up, not paid for again: stopped while testing, the builder's result is
   kept and a new tester runs; stopped while reviewing, only a new reviewer
   runs. If the files changed after the tests' checkpoint, the tests run again.
+* Stopped by the run budget (M4.6, ``needs_review`` with ``budget_stop``):
+  after the budget is raised it goes on at the stage it reached, like a stop.
 * Without a checkpoint (stopped while building, or a record made before
   M4.5) a new builder starts, told that the worktree already holds the
   earlier changes, so it can finish them rather than start over.
@@ -50,6 +52,8 @@ def continue_problem(record: dict[str, Any], is_alive: IsAlive) -> str | None:
         alive, why = is_alive(task_id, record)
         if alive:
             return f"{task_id} is still running ({why}); there is nothing to continue."
+    elif status == "needs_review" and record.get("budget_stop"):
+        pass  # stopped by the run budget before an agent started; it can go on once raised
     elif status != "cancelled":
         return (f"{task_id} is {status}. Only a cancelled or interrupted task is continued"
                 + ("; a failed one is retried instead." if status == "failed" else "."))
@@ -139,7 +143,8 @@ def continue_task(
         )
 
     stage, checkpoint, _why = resume_point(record)
-    stopped = "cancelled" if record["status"] == "cancelled" else "interrupted"
+    stopped = {"cancelled": "cancelled", "needs_review": "stopped by the run budget"}.get(
+        record["status"], "interrupted")
     spent = left_behind(record, runner_script=Path(runner_script)).spent
     previous = [*(record.get("previous_attempts") or []), _summary(record, stopped, spent)]
     attempt = attempt_of(record)
