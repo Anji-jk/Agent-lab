@@ -45,6 +45,7 @@ from orchestrator.execution.task_runner import run_task
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
 from orchestrator.scheduling.run_plan import format_step, run_plan as work_through_plan
+from orchestrator.scheduling.run_report import build_report, format_report, save_report
 from orchestrator.scheduling.plan_progress import (
     format_plan_progress, plan_progress, process_liveness,
 )
@@ -230,6 +231,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
     )
 
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Summarise a run: its branch, cost, time, and each task's result. No AI calls.",
+    )
+    report_parser.add_argument("run_id")
+    report_parser.add_argument("--save", action="store_true",
+                               help="Also save it as runs/<run>/report.md.")
+    report_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    report_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+
     budget_parser = subparsers.add_parser(
         "budget",
         help="Show, set or remove a run's spending limit for all its tasks. No AI calls.",
@@ -414,11 +425,10 @@ def run_run_plan(args: argparse.Namespace) -> int:
         repo_path=args.repo_path, worktree_root=args.worktree_root or default_worktree_root(),
         on_step=show,
     )
-    if result.progress is not None:
-        print("\n" + format_plan_progress(result.progress))
-    budget = format_budget(args.runs_dir, args.run_id)
-    if budget:
-        print(budget)
+    text = format_report(build_report(args.run_id, plans_dir=args.plans_dir,
+                                      runs_dir=args.runs_dir))
+    print("\n" + text)
+    print(f"Saved this report: {save_report(args.runs_dir, args.run_id, text)}")
     if result.complete:
         print("\nThe plan is complete. Nothing was pushed or merged.")
         return EXIT_OK
@@ -445,6 +455,15 @@ def run_task_in_background(args: argparse.Namespace) -> int:
     print(f"Watch:  python -m orchestrator status {args.run_id} --watch 2")
     print(f"        python -m orchestrator dashboard {args.run_id}")
     print("It keeps running if you close this window. Nothing will be pushed or merged.")
+    return EXIT_OK
+
+
+def run_report(args: argparse.Namespace) -> int:
+    text = format_report(build_report(args.run_id, plans_dir=args.plans_dir,
+                                      runs_dir=args.runs_dir))
+    print(text, end="")
+    if args.save:
+        print(f"\nSaved: {save_report(args.runs_dir, args.run_id, text)}")
     return EXIT_OK
 
 
@@ -640,6 +659,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_cancel(args)
         if args.command == "budget":
             return run_budget(args)
+        if args.command == "report":
+            return run_report(args)
         if args.command == "status":
             return run_status_command(args)
         if args.command == "events":

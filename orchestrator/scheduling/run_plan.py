@@ -279,7 +279,7 @@ def _do(action: str, run_id: str, task_id: str, worktree_root: Path | None,
 
 
 def format_step(action: str, task_id: str, step: Step | None) -> str:
-    verb = {"run": "Running", "retry": "Retrying", "continue": "Continuing"}[action]
+    verb = {"run": "Starting", "retry": "Retrying", "continue": "Continuing"}[action]
     if step is None:
         extra = {"retry": " (it failed; once more, told what was wrong)",
                  "continue": " (from where it stopped, in its own worktree)"}.get(action, "")

@@ -1,65 +1,25 @@
 """M4.7: run-plan works through a plan one task at a time."""
 
 import json
-import os
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from orchestrator.execution.budget import set_budget
 from orchestrator.execution.cancel import is_plan_process, is_task_process
 from orchestrator.execution.runner_adapter import RunnerOutcome
-from orchestrator.records.task_registry import list_tasks, load_task, save_task, update_task
+from orchestrator.records.task_registry import list_tasks, save_task, update_task
 from orchestrator.scheduling import run_plan as rp
+from run_plan_support import no_process, per_task, stopped, work
 from task_runner_support import (  # pyright: ignore[reportMissingImports]  (conftest.py puts it on the path)
     RUN_ID,
     Stop,
-    build_note,
     costly,
     git,
     run,
     stopping,
     wrong_double,
-    write_note_tests,
 )
-
-
-def no_process(pid):
-    return None  # every recorded process has gone
-
-
-class per_task:
-    """The fake agents, with each task's own behaviour (T1 double, T2 triple, T3 note)."""
-
-    def __init__(self, agents, inner=None):
-        self.agents, self.inner = agents, inner or agents
-        self.behaviours = {
-            "T1": dict(agents.behaviour),
-            "T2": {"builder": agents.build_triple, "tester": agents.test_triple,
-                   "reviewer": agents.review_pass_one},
-            "T3": {"builder": build_note, "tester": write_note_tests,
-                   "reviewer": agents.review_pass_one},
-        }
-
-    def __call__(self, **kwargs):
-        task_id = kwargs["run_id"][len(RUN_ID) + 1:].split("-")[0]
-        self.agents.behaviour = self.behaviours[task_id]
-        return self.inner(**kwargs)
-
-
-def stopped(result) -> str:
-    assert result.stopped is not None, "the plan was expected to stop"
-    return result.stopped
-
-
-def work(world, invoke, **overrides) -> rp.PlanRun:
-    options: dict[str, Any] = dict(plans_dir=world["plans"], runs_dir=world["runs"], repo_path=world["repo"],
-                   worktree_root=world["wt"], runner_script=world["script"],
-                   invoke_runner=invoke, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-                   get_command_line=no_process)
-    options.update(overrides)
-    return rp.run_plan(RUN_ID, **options)
 
 
 def actions(result):
@@ -305,7 +265,7 @@ def test_only_the_runs_own_run_plan_holds_its_lock():
 
 
 def test_format_step():
-    assert rp.format_step("run", "T1", None) == "Running T1..."
+    assert rp.format_step("run", "T1", None) == "Starting T1..."
     assert rp.format_step("retry", "T1", None).startswith("Retrying T1 (it failed")
     done = rp.Step("T1", "run", "done", 1, 0.4)
     assert rp.format_step("run", "T1", done) == "T1: done, $0.4000"
