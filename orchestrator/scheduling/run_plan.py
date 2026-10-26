@@ -16,7 +16,7 @@ What it does at each step, in this order:
    around it: a plan that stops at the first problem is easy to reason about,
    and its branch never holds work that skipped a step.
 4. An interrupted task (its process went away part-way), or one stopped by the
-   run budget: continue it in its own worktree (M4.5), before anything new,
+   run budget or (after its reset) by Claude's usage limit: continue it in its own worktree (M4.5), before anything new,
    because its worktree already holds work that was paid for.
 5. A failed task with its retry left: retry it once, with the findings (M4.4).
 6. Otherwise, the next ready task in plan order: run it.
@@ -24,6 +24,11 @@ What it does at each step, in this order:
 A task stopped by the run budget stops the whole plan at once: every later
 agent would meet the same limit. Raise the budget and run ``run-plan`` again;
 the stopped task continues from the stage it reached.
+
+So does a task stopped by Claude's usage limit (M5.5: the five-hour or weekly
+limit refused an agent). Every later agent would be refused too. Run
+``run-plan`` again once the limit has reset (the stop message names the time);
+before then it stops at once, and after it the task continues from its stage.
 
 Only one ``run-plan`` may work on a run at a time. It holds
 ``runs/<run>/run-plan.json`` (its process ID) while it works; a lock left by a
@@ -46,7 +51,8 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
 from orchestrator.execution.cancel import command_line, is_plan_process
-from orchestrator.execution.continuing import continue_task
+from orchestrator.execution.continuing import continue_task, limit_not_reset
+from orchestrator.execution.diagnose import when_text
 from orchestrator.execution.retry import retry_problem, retry_task
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.run_registry import run_directory, utc_now
@@ -75,6 +81,7 @@ class Step:
     cost_usd: float | None = None
     reason: str | None = None
     budget_stop: bool = False  # an agent was not started because of the run budget
+    limit_stop: str | None = None  # Claude's usage limit stopped an agent: when it resets ("" unknown)
 
 
 @dataclass
@@ -167,6 +174,13 @@ def next_action(progress: PlanProgress,
             can_go_on.append(("continue", task.task_id))
         elif task.state == "needs_review" and record.get("budget_stop"):
             can_go_on.append(("continue", task.task_id))
+        elif task.state == "needs_review" and record.get("limit_stop"):
+            resets = limit_not_reset(record)
+            if resets:
+                return (f"{task.task_id} was stopped by Claude's usage limit, which resets at "
+                        f"{when_text(resets)}. Run run-plan again after that; {task.task_id} continues "
+                        "from where it stopped.")
+            can_go_on.append(("continue", task.task_id))
         elif task.state == "failed" and retry_problem(record) is None:
             can_go_on.append(("retry", task.task_id))
         elif task.state in ("failed", "needs_review", "cancelled"):
@@ -223,6 +237,13 @@ def run_plan(
                                      runner_script=Path(runner_script))
             result.progress = progress
             last = result.steps[-1] if result.steps else None
+            if last is not None and last.limit_stop is not None:
+                when = f", which resets at {when_text(last.limit_stop)}" if last.limit_stop else ""
+                result.stopped = (f"{last.task_id} was stopped by Claude's usage limit{when}. Every "
+                                  "later agent would be refused too, so the plan stops here. Run "
+                                  f"run-plan again after the reset: {last.task_id} continues from "
+                                  "where it stopped.")
+                return result
             if last is not None and last.budget_stop:
                 result.stopped = (f"{last.task_id} was stopped by the run budget. {last.reason} "
                                   f"Then run-plan again: {last.task_id} continues from where it stopped.")
@@ -254,12 +275,20 @@ def run_plan(
                         record.get("cost_usd"),
                         _budget_reason(reasons) if record.get("budget_stop") else
                         (str(reasons[0]) if reasons else None),
-                        bool(record.get("budget_stop")))
+                        bool(record.get("budget_stop")),
+                        _limit_resets(record))
             result.steps.append(step)
             if on_step:
                 on_step(action, task_id, step)
     finally:
         release_lock(lock)
+
+
+def _limit_resets(record: dict[str, Any]) -> str | None:
+    limit = record.get("limit_stop")
+    if not isinstance(limit, dict):
+        return None
+    return str(limit.get("resets_at") or "")
 
 
 def _budget_reason(reasons: list[Any]) -> str:

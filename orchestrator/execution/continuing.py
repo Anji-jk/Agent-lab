@@ -12,6 +12,9 @@ starting at the stage it had reached, with fresh agents:
   runs. If the files changed after the tests' checkpoint, the tests run again.
 * Stopped by the run budget (M4.6, ``needs_review`` with ``budget_stop``):
   after the budget is raised it goes on at the stage it reached, like a stop.
+* Stopped by Claude's usage limit (M5.5, ``needs_review`` with ``limit_stop``):
+  once the limit has reset, it goes on at the stage it reached. Before the
+  reset time it is refused, since the agent would only be refused again.
 * Without a checkpoint (stopped while building, or a record made before
   M4.5) a new builder starts, told that the worktree already holds the
   earlier changes, so it can finish them rather than start over.
@@ -28,6 +31,7 @@ retry. It is refused when the run has moved on since the task started
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,7 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import checks as tc
 from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
+from orchestrator.execution.diagnose import when_text
 from orchestrator.execution.retry import archive_attempt, restore_attempt
 from orchestrator.monitoring.progress import attempt_of
 from orchestrator.records.task_registry import (
@@ -45,7 +50,23 @@ MAX_ATTEMPTS = 9  # keeps the "-r<n>" names one digit; nine stops is a task to l
 IsAlive = tr.IsAlive
 
 
-def continue_problem(record: dict[str, Any], is_alive: IsAlive) -> str | None:
+def limit_not_reset(record: dict[str, Any], now: datetime | None = None) -> str | None:
+    """The reset time, when the task was stopped by a usage limit that has not reset yet."""
+    limit = record.get("limit_stop")
+    if not isinstance(limit, dict) or not limit.get("resets_at"):
+        return None
+    try:
+        resets = datetime.fromisoformat(str(limit["resets_at"]))
+    except ValueError:
+        return None
+    if resets.tzinfo is None:
+        resets = resets.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return str(limit["resets_at"]) if now < resets else None
+
+
+def continue_problem(record: dict[str, Any], is_alive: IsAlive,
+                     now: datetime | None = None) -> str | None:
     """Why this task cannot be continued, or None when it can."""
     task_id, status = record["task_id"], record["status"]
     if status in ACTIVE_STATUSES or status == "pending":
@@ -54,6 +75,11 @@ def continue_problem(record: dict[str, Any], is_alive: IsAlive) -> str | None:
             return f"{task_id} is still running ({why}); there is nothing to continue."
     elif status == "needs_review" and record.get("budget_stop"):
         pass  # stopped by the run budget before an agent started; it can go on once raised
+    elif status == "needs_review" and record.get("limit_stop"):
+        resets = limit_not_reset(record, now)
+        if resets:
+            return (f"{task_id} was stopped by Claude's usage limit, which resets at "
+                    f"{when_text(resets)}. Continue it after that.")
     elif status != "cancelled":
         return (f"{task_id} is {status}. Only a cancelled or interrupted task is continued"
                 + ("; a failed one is retried instead." if status == "failed" else "."))
@@ -143,8 +169,9 @@ def continue_task(
         )
 
     stage, checkpoint, _why = resume_point(record)
-    stopped = {"cancelled": "cancelled", "needs_review": "stopped by the run budget"}.get(
-        record["status"], "interrupted")
+    stopped = {"cancelled": "cancelled",
+               "needs_review": ("stopped by Claude's usage limit" if record.get("limit_stop")
+                                else "stopped by the run budget")}.get(record["status"], "interrupted")
     spent = left_behind(record, runner_script=Path(runner_script)).spent
     previous = [*(record.get("previous_attempts") or []), _summary(record, stopped, spent)]
     attempt = attempt_of(record)

@@ -46,6 +46,7 @@ from orchestrator.github.publish import (
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.task_registry import list_tasks
 from orchestrator.scheduling.plan_progress import CommandLine, PlanProgress, plan_progress
+from orchestrator.scheduling.left_behind import LeftBehind, left_behind
 from orchestrator.scheduling.run_report import build_report, format_report
 
 TASK_PLACES = {
@@ -97,6 +98,14 @@ def report_key(progress: PlanProgress) -> str | None:
     if progress.state not in ("complete", "stopped"):
         return None
     return progress.state + ":" + ",".join(f"{t.task_id}={t.state}" for t in progress.tasks)
+
+
+def _left_behind(record: dict[str, Any], runner_script: Path) -> LeftBehind | None:
+    """What a cancelled task had done; None when it cannot be read (the comment goes without)."""
+    try:
+        return left_behind(record, runner_script=runner_script)
+    except Exception:  # a comment is a report; it must not stop the sync
+        return None
 
 
 def sync_board(
@@ -184,9 +193,12 @@ def sync_board(
                 changed = True
         record = records.get(task.task_id)
         key = comment_key(record) if (comments and record and number) else None
-        if key and number:
+        if key and number and key not in (entry.get("comments") or []):
+            left = None
+            if record and record.get("status") == "cancelled":  # what it had done (M5.5)
+                left = _left_behind(record, Path(runner_script))
             changed |= comment(int(number), entry, key,
-                               task_comment(run_id, task.task_id, record or {}), "comments")
+                               task_comment(run_id, task.task_id, record or {}, left), "comments")
         if changed:
             save_items(runs_dir, run_id, items, parent or None)
 

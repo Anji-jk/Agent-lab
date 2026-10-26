@@ -189,3 +189,84 @@ def test_the_writes_are_spaced_out(lab):
     sync(lab, pause=1.0, sleep=pauses.append)
     # T1 moved, closed, commented; T2 moved; #4 found (add) and moved: six writes, five pauses
     assert pauses == [1.0] * 5
+
+
+# --- a cancelled attempt says what it had done (M5.5) ------------------------------------------
+
+from orchestrator.scheduling.left_behind import AgentLeft, FileChange, LastTests, LeftBehind  # noqa: E402
+
+
+def left(**extra):
+    values: dict[str, Any] = dict(
+        run_id=RUN, task_id="T1", status="cancelled", stage="testing", base_commit="b" * 40,
+        files=[FileChange("calc.py", "modified", 12, 1), FileChange("tests/test_double.py", "new", 30, 0)],
+        files_note=None,
+        agents=[AgentLeft("builder", "builder: finished, 8 turns, $0.0577", "Added double().",
+                          None, 0.0577, finished=True),
+                AgentLeft("tester", "tester: cancelled, 3 turns, $0.0201", f"Writing tests {SECRET}",
+                          LastTests("python -m pytest tests/test_double.py", "failed", "1 failed, 1 passed"),
+                          0.0201),
+                AgentLeft("reviewer", "reviewer: not started", None, None, None)],
+        spent=0.0778)
+    values.update(extra)
+    return LeftBehind(**values)
+
+
+def cancelled_record():
+    return {"status": "cancelled", "reasons": ["Cancelled by you at 2026-10-26T09:00:00+00:00."],
+            "agents": {}, "findings": {}}
+
+
+def test_a_cancelled_comment_says_what_it_had_done():
+    text = cm.task_comment(RUN, "T1", cancelled_record(), left())
+    assert "**What it had done before it was stopped** (not checked or reviewed):" in text
+    assert "- Stopped at: testing" in text
+    assert "- Files changed since the base commit `bbbbbbbbbbbb` (2):" in text
+    assert "  - modified `calc.py` (+12 -1)" in text and "  - new `tests/test_double.py` (+30 -0)" in text
+    assert "- builder: finished, 8 turns, $0.0577" in text and "  - last said: Added double()." in text
+    assert "  - last tests: `python -m pytest tests/test_double.py` → failed (1 failed, 1 passed)" in text
+    assert "reviewer: not started" not in text  # an agent that never started adds nothing
+    assert "- Spent before the stop: $0.0778" in text
+    assert SECRET not in text
+    assert "**Why:**" in text and "Cancelled by you" in text
+
+
+def test_a_cancelled_comment_whose_files_cannot_be_read_says_so():
+    text = cm.task_comment(RUN, "T1", cancelled_record(),
+                           left(files=None, files_note="no worktree was created", agents=[]))
+    assert "- Files: unknown, no worktree was created" in text
+
+
+def test_without_what_it_had_done_the_comment_is_as_before():
+    assert "What it had done" not in cm.task_comment(RUN, "T1", cancelled_record())
+
+
+def test_the_sync_adds_what_a_cancelled_task_had_done(lab):
+    record(lab, "T1", "building", "cancelled")
+    _, issues = sync(lab)
+    text = issues.comments()[0][1]
+    assert "**T1: cancelled**" in text
+    assert "**What it had done before it was stopped**" in text
+    assert "- Stopped at: building" in text and "no worktree was created" in text
+
+
+def test_a_done_task_does_not_get_that_section(lab):
+    record(lab, "T1", "building", "testing", "reviewing", "done")
+    _, issues = sync(lab)
+    assert "What it had done" not in issues.comments()[0][1]
+
+
+def test_a_limit_stop_comment_gives_the_reason(lab):
+    reason = ("The reviewer was stopped by Claude's usage limit: Claude's weekly usage limit was "
+              "reached; it resets at 2026-10-26 11:00 UTC.")
+    record(lab, "T1", "building", "testing", "reviewing", "needs_review", reasons=[reason])
+    _, issues = sync(lab)
+    text = issues.comments()[0][1]
+    assert "Claude's weekly usage limit was reached; it resets at 2026-10-26 11:00 UTC." in text
+    assert "no detail reported" not in text
+
+
+def test_a_cancelled_comment_costs_what_was_spent_and_has_no_empty_agent_table():
+    text = cm.task_comment(RUN, "T1", cancelled_record(), left())
+    assert text.startswith("**T1: cancelled** (attempt 1) · Cost $0.0778")
+    assert "| Agent |" not in text

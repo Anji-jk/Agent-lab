@@ -34,12 +34,13 @@ def test_a_complete_run_names_its_branch_and_the_last_commit(world, agents):
     result = report(world)
 
     assert result.plan_state == "complete"
-    # T2 finished last, so its branch holds T1's work too (M4.2).
-    assert result.branch == records["T2"]["branch"]
+    # The run's own branch (M7.1) holds both tasks; one at a time, each merge was a
+    # fast-forward, so it ends at T2's commit.
+    assert result.branch == f"agent/issue-7-{RUN_ID}"
     assert result.head_commit == records["T2"]["commit"]
     shown = rr.format_report(result)
-    assert f"Branch:  {records['T2']['branch']} at {records['T2']['commit'][:12]}" in shown
-    assert f"git log --oneline {world['base'][:12]}..{records['T2']['branch']}" in shown
+    assert f"Branch:  {result.branch} at {records['T2']['commit'][:12]}" in shown
+    assert f"git log --oneline {world['base'][:12]}..{result.branch}" in shown
     assert "Nothing was pushed or merged" in shown
 
 

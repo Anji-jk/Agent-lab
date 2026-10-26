@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.execution import runner_adapter
+from orchestrator.execution.diagnose import failure_reason
 from orchestrator.errors import ExecutionRefused
 from orchestrator.legacy.planning import ExecutionPlan
 from orchestrator.planning.plan_file import (
@@ -263,7 +264,7 @@ def generate_ai_plan(
     if outcome.outcome != "success":
         raise PlanningError(
             f"Planner {outcome.outcome.replace('_', ' ')}: "
-            f"{outcome.error or 'no detail reported'} "
+            f"{failure_reason(outcome.outcome, outcome.error, outcome.result, outcome.process_exit_code)} "
             f"(artifacts: {planner_dir})"
         )
 

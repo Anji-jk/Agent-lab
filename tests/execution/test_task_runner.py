@@ -344,7 +344,7 @@ def test_a_good_task_logs_every_orchestrator_step_in_order(world, agents):
         "stage", "agent_started", "agent_finished", "tester_checked",
         "suite_started", "suite_finished", "named_tests_started", "named_tests_finished",
         "stage", "agent_started", "agent_finished", "reviewer_checked",
-        "decided", "committed", "task_finished",
+        "decided", "committed", "merge_started", "merged", "task_finished",
     ]
     assert [e["status"] for e in entries if e["step"] == "stage"] == ["building", "testing", "reviewing"]
     assert [e["role"] for e in entries if e["step"] == "agent_started"] == ["builder", "tester", "reviewer"]

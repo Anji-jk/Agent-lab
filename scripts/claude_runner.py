@@ -25,6 +25,59 @@ from agent_env import AGENT_ENV_ALLOWLIST, build_agent_env  # noqa: F401  (re-ex
 RUNS_DIR_VARIABLE = "AGENT_LAB_AGENT_RUNS_DIR"
 
 
+LIMIT_NAMES = {"seven_day": "weekly", "seven_day_opus": "weekly (Opus)",
+               "seven_day_sonnet": "weekly (Sonnet)", "five_hour": "5-hour"}
+ERROR_TEXT_LIMIT = 300
+
+
+def usage_limit(event: dict[str, Any]) -> dict[str, Any] | None:
+    """A ``rate_limit_event`` that refused the request, as {type, status, resets_at}; else None.
+
+    Claude sends one when the account reaches a usage limit (its five-hour or weekly
+    limit, say). ``allowed`` (or ``allowed_warning``) means the request went ahead.
+    """
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    status = info.get("status")
+    if not isinstance(status, str) or status.startswith("allowed"):
+        return None
+    resets = info.get("resetsAt")
+    resets_at = None
+    if isinstance(resets, (int, float)) and not isinstance(resets, bool):
+        resets_at = datetime.fromtimestamp(resets, timezone.utc).isoformat(timespec="seconds")
+    return {"type": str(info.get("rateLimitType") or "unknown"), "status": status,
+            "resets_at": resets_at}
+
+
+def when_text(iso: str) -> str:
+    """A reset time as people read it: 2026-10-26 11:00 UTC."""
+    try:
+        moment = datetime.fromisoformat(iso).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return str(iso)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def error_reason(result: dict[str, Any]) -> str:
+    """Why Claude's run failed, in words, for a run Claude itself reported as an error."""
+    text = " ".join(str(result.get("result_text") or "").split())
+    if len(text) > ERROR_TEXT_LIMIT:
+        text = text[: ERROR_TEXT_LIMIT - 1] + "\u2026"
+    limit = result.get("rate_limit")
+    if isinstance(limit, dict):
+        name = LIMIT_NAMES.get(str(limit.get("type")), str(limit.get("type")))
+        resets = f"; it resets at {when_text(limit['resets_at'])}" if limit.get("resets_at") else ""
+        said = f' Claude said: "{text}"' if text else ""
+        return f"Claude's {name} usage limit was reached{resets}.{said}"
+    subtype = result.get("subtype")
+    if text:
+        return f"Claude reported an error: {text}"
+    if subtype:
+        return f"Claude reported an error ({subtype})."
+    return "Claude reported an error without saying what it was."
+
+
 def runs_root() -> Path:
     override = os.environ.get(RUNS_DIR_VARIABLE)
     if override:
@@ -621,6 +674,11 @@ def run_task(
                     progress.observe(event)
                     progress.write()
 
+                    if event_type == "rate_limit_event":
+                        limit = usage_limit(event)
+                        if limit:
+                            result["rate_limit"] = limit
+
                     if event_type == "result":
                         result_events.append(event)
                         result["claude_result_event"] = event
@@ -653,10 +711,13 @@ def run_task(
         result["status"] = "failed"
     elif result.get("is_error") is True:
         result["status"] = "failed"
+        result["error"] = error_reason(result)
     elif result["exit_code"] == 0:
         result["status"] = "succeeded"
     else:
         result["status"] = "failed"
+    if result["status"] == "failed" and not result["error"] and result.get("rate_limit"):
+        result["error"] = error_reason(result)
 
     result["finished_at"] = utc_now()
     result["duration_seconds"] = round(time.monotonic() - started_clock, 3)

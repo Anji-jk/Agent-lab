@@ -65,7 +65,7 @@ from orchestrator.execution.worktrees import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "orchestration"
-
+GITHUB_REPO = "Anji-jk/Agent-lab"
 EVENTS_POLL_SECONDS = 1.0
 
 EXIT_OK = 0
@@ -95,7 +95,7 @@ def _add_plan_options(
     parser.add_argument("number", type=int, help="GitHub Issue number.")
     parser.add_argument(
         "--repo",
-        default="Anji-jk/Agent-lab",
+        default=GITHUB_REPO,
         help="GitHub repository in OWNER/REPO format.",
     )
     parser.add_argument(
@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     issue_parser.add_argument(
         "--repo",
-        default="Anji-jk/Agent-lab",
+        default=GITHUB_REPO,
         help="GitHub repository in OWNER/REPO format.",
     )
 

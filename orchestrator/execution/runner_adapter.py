@@ -51,6 +51,7 @@ RETAINED_FIELDS = (
     "cache_creation_input_tokens",
     "is_error",
     "subtype",
+    "rate_limit",
     "events_file",
     "stderr_file",
     "progress_file",

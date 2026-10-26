@@ -12,8 +12,9 @@ time, while a run works or long after. ``run-plan`` saves it to
 ``--save`` saves it too. Secrets in the text (reasons can quote command output)
 are masked.
 
-The run's branch is the branch of the task that finished last: since M4.2 every
-task starts from the newest finished work, so that branch holds all of it.
+The run's branch is its integration branch (M7.1), into which every finished task
+is merged. A run from before M7.1 has none: then it is the branch of the task that
+finished last, since from M4.2 every task starts from the newest finished work.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.execution.integration import load_integration
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.budget import format_budget, task_spent
 from orchestrator.monitoring.event_feed import mask_secrets
@@ -211,7 +213,11 @@ def build_report(
         report.started_at = min(starts).isoformat()
     if ends:
         report.finished_at = max(ends).isoformat()
-    if last_done is not None:
+    integration = load_integration(runs_dir, run_id)
+    if integration is not None:  # the run's own branch holds every merged task (M7.1)
+        report.branch = integration["branch"]
+        report.head_commit = integration.get("head") or integration.get("base_commit")
+    elif last_done is not None:
         report.branch, report.head_commit = last_done[1].get("branch"), last_done[1].get("commit")
 
     decision = next_action(progress, records)

@@ -25,6 +25,8 @@ from typing import Any
 from orchestrator.execution import runner_adapter
 
 from orchestrator.execution import agents as ta
+from orchestrator.execution.diagnose import failure_reason
+from orchestrator.execution.integration import MergeProblem, integration_head, merge_task
 
 from orchestrator.execution import checks as tc
 from orchestrator.execution.budget import BudgetExhausted, budget_problem
@@ -37,7 +39,7 @@ from orchestrator.records.task_events import NullLog, TaskLog
 from orchestrator.records.task_registry import (
     ACTIVE_STATUSES, list_tasks, load_task, save_task, update_task,
 )
-from orchestrator.execution.worktrees import create_worktree
+from orchestrator.execution.worktrees import WorktreeError, create_worktree
 from orchestrator.monitoring.progress import agent_run_id as attempt_agent_run_id
 
 TEST_DIRS = (f"{TEST_DIR}/",)
@@ -104,7 +106,8 @@ def find_task(plan: dict[str, Any], task_id: str) -> dict[str, Any]:
     raise ExecutionRefused(f"The plan has no task {task_id!r} (it has: {known}).")
 
 
-def run_head(repo_path: Path, run_id: str, records: dict[str, dict[str, Any]], plan_base: str) -> str:
+def run_head(repo_path: Path, run_id: str, records: dict[str, dict[str, Any]], plan_base: str,
+             runs_dir: Path | None = None) -> str:
     """The commit the run's next task starts from (M4.2).
 
     Every task of a run starts from the newest finished work, so the run's
@@ -114,6 +117,10 @@ def run_head(repo_path: Path, run_id: str, records: dict[str, dict[str, Any]], p
     starts from a commit containing theirs, because the head contains every
     finished task's commit.
     """
+    if runs_dir is not None:
+        head = integration_head(runs_dir, run_id, repo_path)
+        if head is not None:  # the run's branch (M7.1) holds every merged task
+            return head
     finished = [(task_id, record["commit"]) for task_id, record in sorted(records.items())
                 if record.get("status") == "done" and record.get("commit")]
     if not finished:
@@ -195,7 +202,7 @@ def prepare(
     base = plan["config"]["base_commit"]
     if not tc.commit_exists(repo_path, base):
         raise ExecutionRefused(f"Base commit {base[:12]} does not exist in {repo_path}.")
-    base = run_head(repo_path, run_id, records, base)
+    base = run_head(repo_path, run_id, records, base, runs_dir)
 
     profile = profile_for(task["complexity"])
     return TaskContext(plan, task, base, {name: role_settings(profile, name) for name in ROLE_NAMES})
@@ -213,6 +220,13 @@ def _total_cost(agents: dict[str, dict[str, Any]]) -> float:
     )
 
 
+def limit_reason(name: str, reason: str) -> str:
+    """An agent stopped by Claude's usage limit: the reason, and what to do about it."""
+    return (f"The {name} was stopped by Claude's usage limit: {reason} Nothing is wrong with "
+            "the task: once the limit resets, run run-plan again (or run-task --continue), and "
+            "it goes on from the stage it reached.")
+
+
 class _Pipeline:
     def __init__(self, ctx: TaskContext, run_id: str, runs_dir: Path, worktree: Path,
                  runner_script: Path, invoke_runner, test_command: tuple[str, ...], env,
@@ -223,6 +237,7 @@ class _Pipeline:
         self.reused: dict[str, dict[str, Any]] = {}  # agents' results kept from the stopped attempt
         self.test_timeout = TEST_TIMEOUT_SECONDS
         self.budget_stopped = False
+        self.limit_stop: dict[str, Any] | None = None  # Claude's usage limit refused an agent
         self.log = log or NullLog()
         self.worktree, self.runner_script = worktree, runner_script
         self.invoke_runner, self.test_command, self.env = invoke_runner, test_command, env
@@ -278,14 +293,23 @@ class _Pipeline:
             "outcome": outcome.outcome,
             **_agent_metrics(outcome.result),
         }
+        reason = None
+        if outcome.outcome != "success":
+            # Always a reason: Claude's own, or one worked out from the events (M5.5).
+            reason = failure_reason(outcome.outcome, outcome.error, outcome.result,
+                                    outcome.process_exit_code)
+            self.agents[name]["error"] = reason
         self.log.emit("agent_finished", role=name, outcome=outcome.outcome,
                       cost_usd=outcome.result.get("total_cost_usd"),
-                      seconds=outcome.result.get("duration_seconds"), error=outcome.error)
-        if outcome.outcome != "success":
+                      seconds=outcome.result.get("duration_seconds"), error=reason)
+        limit = outcome.result.get("rate_limit")
+        if reason and isinstance(limit, dict):
+            self.limit_stop = {**limit, "role": name}
+            self.log.emit("limit_stop", role=name, limit=limit)
+            self.findings.infrastructure.append(limit_reason(name, reason))
+        elif reason:
             self.findings.infrastructure.append(
-                f"The {name} {outcome.outcome.replace('_', ' ')}: "
-                f"{outcome.error or 'no detail reported'}"
-            )
+                f"The {name} {outcome.outcome.replace('_', ' ')}: {reason}")
         return outcome
 
     def report(self, name: str, outcome, parser):
@@ -475,6 +499,31 @@ def _commit_message(plan: dict[str, Any], task: dict[str, Any], run_id: str) -> 
     )
 
 
+def _merge(run_id: str, task: dict[str, Any], commit: str, *, plan: dict[str, Any],
+           ctx: TaskContext, runs_dir: Path, repo_path: Path, worktree_root: Path | None,
+           test_command: tuple[str, ...], test_timeout: int, env, log, status: str,
+           reasons: list[str]) -> tuple[str, list[str], dict[str, Any]]:
+    """Merge a done task into the run's branch (M7.1): (status, reasons, what happened)."""
+    log.emit("merge_started", commit=commit)
+    try:
+        merged = merge_task(run_id, task["id"], commit, issue_number=int(plan["issue"]["number"]),
+                            base_commit=ctx.base_commit, runs_dir=runs_dir, repo_path=repo_path,
+                            worktree_root=worktree_root, test_command=test_command,
+                            test_timeout=test_timeout, env=env, title=task.get("title", ""))
+    except MergeProblem as exc:
+        log.emit("merge_failed", kind=exc.kind, reason=exc.reason)
+        # A conflict or a failing merged suite is the task's to fix: its retry starts from
+        # the branch's new head and sees the other work. Anything else needs a person.
+        status = ta.FAILED if exc.kind in ("conflict", "suite") else ta.NEEDS_REVIEW
+        return status, [exc.reason], {"problem": exc.kind, **exc.detail}
+    except (tc.CheckError, WorktreeError, FileExistsError, OSError, RunRegistryError) as exc:
+        log.emit("merge_failed", kind="error", reason=str(exc))
+        return ta.NEEDS_REVIEW, [f"The work was committed on its own branch, but merging it "
+                                 f"into the run's branch failed: {exc}"], {"problem": "error"}
+    log.emit("merged", **merged.describe())
+    return status, reasons, merged.describe()
+
+
 def run_task(
     run_id: str,
     task_id: str,
@@ -572,7 +621,7 @@ def run_task(
             pipeline.review()
         status, reasons = ta.decide(pipeline.findings)
         log.emit("decided", status=status, reasons=reasons)
-        commit = None
+        commit, merge = None, None
         if status == ta.DONE:
             commit = tc.commit_all(worktree, _commit_message(plan, task, run_id))
             if tc.changed_paths(worktree):
@@ -581,8 +630,15 @@ def run_task(
                 log.emit("commit_incomplete", reasons=reasons)
             else:
                 log.emit("committed", commit=commit, branch=branch)
+                status, reasons, merge = _merge(run_id, task, commit, plan=plan, ctx=ctx,
+                                                runs_dir=runs_dir, repo_path=repo_path,
+                                                worktree_root=worktree_root,
+                                                test_command=test_command,
+                                                test_timeout=test_timeout, env=env, log=log,
+                                                status=status, reasons=reasons)
     except Exception as exc:  # a crash must leave a record, not a stuck "building"
         status, reasons, commit = ta.NEEDS_REVIEW, [f"The pipeline stopped: {type(exc).__name__}: {exc}"], None
+        merge = None
         log.emit("pipeline_crashed", error=f"{type(exc).__name__}: {exc}")
 
     current = load_task(runs_dir, run_id, task_id)["status"]
@@ -596,6 +652,8 @@ def run_task(
         "agents": pipeline.agents,
         **({"reused_agents": pipeline.reused} if pipeline.reused else {}),
         **({"budget_stop": True} if pipeline.budget_stopped else {}),
+        **({"limit_stop": pipeline.limit_stop} if pipeline.limit_stop else {}),
+        **({"merge": merge} if merge else {}),
         "checks": pipeline.checks,
         "findings": {k: getattr(pipeline.findings, k) for k in pipeline.findings.__dataclass_fields__},
         "cost_usd": _total_cost(pipeline.agents),

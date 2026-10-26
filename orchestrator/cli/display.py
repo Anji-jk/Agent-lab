@@ -102,6 +102,13 @@ def display_task(record: dict) -> None:
         print(f"Worktree:    {record.get('worktree_path')}")
     if record.get("commit"):
         print(f"Commit:      {record['commit']}")
+    merge = record.get("merge") or {}
+    if merge.get("branch") and not merge.get("problem"):
+        how = {"fast-forward": "fast-forward", "merge": "merged; the full suite passed on the result",
+               "already": "already there"}.get(str(merge.get("kind")), str(merge.get("kind")))
+        print(f"Merged into: {merge['branch']} ({how})")
+    elif merge.get("problem"):
+        print(f"Merged into: not merged ({merge['problem']}); see Because")
     reused = record.get("reused_agents") or {}
     stopped = record.get("status") in ("cancelled", "pending", "building", "testing", "reviewing")
     for name, settings in (record.get("roles") or {}).items():
