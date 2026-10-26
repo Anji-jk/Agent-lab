@@ -179,6 +179,15 @@ def next_action(progress: PlanProgress,
     return "No task can start, and none is running."  # not expected: waiting needs a cause
 
 
+def describe_next(decision: tuple[str, str] | str | None) -> str:
+    """``next_action``'s answer for the plan line: "continue T2", or "" when it would stop."""
+    if not isinstance(decision, tuple):
+        return ""
+    action, task_id = decision
+    verb = {"run": "start", "retry": "retry", "continue": "continue"}[action]
+    return f"{verb} {task_id}"
+
+
 # --- working through the plan -----------------------------------------------------------------
 
 

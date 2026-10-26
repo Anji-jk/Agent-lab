@@ -252,7 +252,8 @@ def test_status_shows_the_plan_progress(runs, monkeypatch, capsys):
     code = cli.main(["status", RUN, "--runs-dir", str(runs), "--plans-dir", str(runs)])
     out = capsys.readouterr().out
     assert code == cli.EXIT_OK
-    assert "Plan: 0 of 2 done · stopped: T1 interrupted" in out
+    # run-plan would continue T1, so the plan is not stopped (M5.0)
+    assert "Plan: 0 of 2 done · next: continue T1" in out and "stopped:" not in out
     assert "T2   waiting      for T1" in out
 
 
@@ -260,7 +261,7 @@ def test_status_before_any_task_ran_shows_the_first_task_ready(runs, capsys):
     stored_plan(runs)
     assert cli.main(["status", RUN, "--runs-dir", str(runs), "--plans-dir", str(runs)]) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert "Plan: 0 of 2 done · next T1" in out and "T1   ready        can start now" in out
+    assert "Plan: 0 of 2 done · next: start T1" in out and "T1   ready        can start now" in out
 
 
 def test_status_watch_stops_once_the_only_running_task_is_interrupted(runs, monkeypatch, capsys):
@@ -272,3 +273,29 @@ def test_status_watch_stops_once_the_only_running_task_is_interrupted(runs, monk
     monkeypatch.setattr(cli.os, "system", lambda command: 0)
     code = cli.main(["status", RUN, "--watch", "2", "--runs-dir", str(runs), "--plans-dir", str(runs)])
     assert code == cli.EXIT_OK and "Nothing is running any more." in capsys.readouterr().out
+
+# --- M5.0: "next" as run-plan would do it ------------------------------------------------------
+
+
+def test_next_names_what_run_plan_would_do_not_just_the_first_ready_task():
+    shape = plan(("T1", []), ("T2", ["T1"]), ("T3", []), ("T4", ["T3"]), ("T5", ["T2"]))
+    p = pp.compute_progress(RUN, shape, {"T1": rec("failed", reasons=["Tests failed."]),
+                                         "T3": rec("done")}, alive())
+    assert pp.format_plan_progress(p).splitlines()[0] == "Plan: 1 of 5 done · next T4"  # without it
+    assert pp.format_plan_progress(p, next_step="retry T1").splitlines()[0] == (
+        "Plan: 1 of 5 done · next: retry T1")
+
+
+def test_a_plan_run_plan_would_stop_on_says_stopped_and_names_no_next():
+    shape = plan(("T1", []), ("T2", ["T1"]))
+    p = pp.compute_progress(RUN, shape, {"T1": rec("needs_review", reasons=["Crashed."])}, alive())
+    line = pp.format_plan_progress(p, next_step="").splitlines()[0]
+    assert line == "Plan: 0 of 2 done · stopped: T1 needs_review"
+
+
+def test_describe_next():
+    from orchestrator.scheduling.run_plan import describe_next
+    assert describe_next(("continue", "T2")) == "continue T2"
+    assert describe_next(("run", "T3")) == "start T3"
+    assert describe_next(("retry", "T1")) == "retry T1"
+    assert describe_next("T1 needs review.") == "" and describe_next(None) == ""

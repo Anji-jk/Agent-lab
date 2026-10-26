@@ -29,7 +29,12 @@ from orchestrator.execution.cancel import cancel_task
 from orchestrator.execution.continuing import continue_task
 from orchestrator.execution.retry import retry_task
 from orchestrator.legacy.executor import execute_plan
+from orchestrator.github.board import board_path, connect_board, format_connection, save_board
 from orchestrator.github.client import GitHubAPIError, GitHubClient
+from orchestrator.github.projects import ProjectClient, project_token
+from orchestrator.github.publish import format_published, load_board, publish
+from orchestrator.github.sync import sync_board
+from orchestrator.github.tokens import load_tokens
 from orchestrator.legacy.planning import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -40,11 +45,13 @@ from orchestrator.monitoring.progress import format_status, planner_view, run_st
 from orchestrator.monitoring import dashboard as dash
 from orchestrator.monitoring.event_feed import stable_index
 from orchestrator.records.run_registry import RunRegistryError
-from orchestrator.records.task_registry import load_task
+from orchestrator.records.task_registry import list_tasks, load_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
-from orchestrator.scheduling.run_plan import format_step, run_plan as work_through_plan
+from orchestrator.scheduling.run_plan import (
+    describe_next, format_step, next_action, run_plan as work_through_plan,
+)
 from orchestrator.scheduling.run_report import build_report, format_report, save_report
 from orchestrator.scheduling.plan_progress import (
     format_plan_progress, plan_progress, process_liveness,
@@ -230,6 +237,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--worktree-root", type=Path, default=None,
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
     )
+    run_plan_parser.add_argument(
+        "--no-board", action="store_true",
+        help="Leave the GitHub board alone for this run, even when one is connected.",
+    )
+
+    board_parser = subparsers.add_parser(
+        "board", help="The GitHub Project board that shows each task's status.",
+    )
+    board_commands = board_parser.add_subparsers(dest="board_command", required=True)
+    connect_parser = board_commands.add_parser(
+        "connect",
+        help="Read the board and save which column each task state goes in. "
+             "Writes nothing to GitHub.",
+    )
+    connect_parser.add_argument("--project", type=int, required=True, metavar="N",
+                                help="The number in the board's address: .../projects/N.")
+    connect_parser.add_argument("--owner", default=None,
+                                help="The user who owns the board (default: the repository's owner).")
+    connect_parser.add_argument("--repo", default="Anji-jk/Agent-lab",
+                                help="The repository whose Issues go on the board.")
+    for place, what in (("todo", "not started"), ("in-progress", "running"),
+                        ("attention", "waiting for a person"), ("done", "done")):
+        connect_parser.add_argument(f"--{place}", metavar="COLUMN", default=None,
+                                    help=f"The column for tasks that are {what}, if its name "
+                                         "is not recognised.")
+    connect_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    publish_parser = board_commands.add_parser(
+        "publish",
+        help="Put a run's tasks on GitHub: an Issue each, as sub-issues of the run's Issue, "
+             "on the board. Without --yes it only shows what it would do.",
+    )
+    publish_parser.add_argument("run_id")
+    publish_parser.add_argument("--yes", action="store_true",
+                                help="Create the Issues and cards. Without it nothing is written.")
+    publish_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    publish_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    sync_parser = board_commands.add_parser(
+        "sync",
+        help="Move a run's cards to where its records say (run-plan does this by itself).",
+    )
+    sync_parser.add_argument("run_id")
+    sync_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    sync_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
 
     report_parser = subparsers.add_parser(
         "report",
@@ -417,14 +467,21 @@ def run_run_plan(args: argparse.Namespace) -> int:
           "Claude, so this may take a long while. Ctrl+C stops it; run-plan again goes on "
           "from where it stopped.", file=sys.stderr)
 
+    board = _BoardFollower(args)
+    board.start()
+
     def show(action: str, task_id: str, step) -> None:
         print(format_step(action, task_id, step), flush=True)
+        board.sync(starting=task_id if step is None else None)
 
     result = work_through_plan(
         args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
         repo_path=args.repo_path, worktree_root=args.worktree_root or default_worktree_root(),
         on_step=show,
     )
+    # Not after Ctrl+C: this process still owns the stopped task until it exits, so it
+    # would look running. The next run-plan, or board sync, moves its card.
+    board.sync()
     text = format_report(build_report(args.run_id, plans_dir=args.plans_dir,
                                       runs_dir=args.runs_dir))
     print("\n" + text)
@@ -455,6 +512,94 @@ def run_task_in_background(args: argparse.Namespace) -> int:
     print(f"Watch:  python -m orchestrator status {args.run_id} --watch 2")
     print(f"        python -m orchestrator dashboard {args.run_id}")
     print("It keeps running if you close this window. Nothing will be pushed or merged.")
+    return EXIT_OK
+
+
+def run_board(args: argparse.Namespace) -> int:
+    if args.board_command == "publish":
+        return run_board_publish(args)
+    if args.board_command == "sync":
+        clients = _board_clients(args.runs_dir)
+        print(sync_board(args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
+                         issues=clients[0], project=clients[1]).summary())
+        return EXIT_OK
+    owner = args.owner or args.repo.split("/")[0]
+    token, variable = project_token()
+    client = ProjectClient(owner, args.project, token=token, token_variable=variable)
+    chosen = {"todo": args.todo, "in_progress": args.in_progress,
+              "attention": args.attention, "done": args.done}
+    connection = connect_board(owner, args.project, args.repo, client=client, chosen=chosen)
+    print(format_connection(connection))
+    print(f"\nSaved: {save_board(args.runs_dir, connection.config)}")
+    print("Nothing was written to GitHub.")
+    return EXIT_OK
+
+
+def _board_clients(runs_dir: Path) -> tuple[GitHubClient, ProjectClient]:
+    """The Issue and board clients for the connected board (BoardError/PublishError if none)."""
+    board = load_board(runs_dir)
+    token, variable = project_token()
+    project = ProjectClient(board["owner"], int(board["number"]), token=token,
+                            token_variable=variable)
+    return GitHubClient(repository=board["repository"]), project
+
+
+class _BoardFollower:
+    """run-plan's board work (M5.3): put the tasks on it once, then keep it in line.
+
+    Whatever goes wrong on GitHub is printed and the run goes on: the board shows
+    the run, it never stops it. board sync catches up afterwards.
+    """
+
+    def __init__(self, args: argparse.Namespace):
+        self.args, self.clients = args, None
+        if getattr(args, "no_board", False) or not board_path(args.runs_dir).exists():
+            return
+        try:
+            self.clients = _board_clients(args.runs_dir)
+        except (ExecutionRefused, GitHubAPIError) as exc:
+            self._warn(f"not used: {exc}")
+
+    def _warn(self, text: str) -> None:
+        print(f"Board {text} The run goes on; python -m orchestrator board sync "
+              f"{self.args.run_id} catches up later.", file=sys.stderr)
+
+    def start(self) -> None:
+        if self.clients is None:
+            return
+        try:  # option B: the tasks reach GitHub when you start the run, not when planned
+            result = publish(self.args.run_id, plans_dir=self.args.plans_dir,
+                             runs_dir=self.args.runs_dir, issues=self.clients[0],
+                             project=self.clients[1], write=True)
+        except (ExecutionRefused, GitHubAPIError) as exc:
+            self._warn(f"publish failed: {exc}")
+            return
+        made = [c for c in result.cards if c.done]
+        if made:
+            print(f"Board: put {len(made)} task(s) on {result.board_url}", flush=True)
+        self.sync()
+
+    def sync(self, starting: str | None = None) -> None:
+        if self.clients is None:
+            return
+        try:
+            synced = sync_board(self.args.run_id, plans_dir=self.args.plans_dir,
+                                runs_dir=self.args.runs_dir, issues=self.clients[0],
+                                project=self.clients[1], starting=starting)
+        except (ExecutionRefused, GitHubAPIError) as exc:
+            self._warn(f"sync failed: {exc}")
+            return
+        if synced.moved or synced.closed or synced.problems:
+            print(synced.summary(), flush=True)
+
+
+def run_board_publish(args: argparse.Namespace) -> int:
+    issues, project = _board_clients(args.runs_dir)
+    if args.yes:
+        print("Creating the task Issues and cards on GitHub...", file=sys.stderr)
+    result = publish(args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
+                     issues=issues, project=project, write=args.yes)
+    print(format_published(result))
     return EXIT_OK
 
 
@@ -513,7 +658,9 @@ def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
     if not has_plan:
         return any(task.active_role for task in tasks)
     progress = plan_progress(load_task_plan(plans_dir, run_id), runs_dir, run_id)
-    print("\n" + format_plan_progress(progress))
+    # "next" as run-plan would do it: an interrupted task first, a failed one retried first.
+    upcoming = describe_next(next_action(progress, list_tasks(runs_dir, run_id)))
+    print("\n" + format_plan_progress(progress, next_step=upcoming))
     budget = format_budget(runs_dir, run_id)
     if budget:
         print(budget)
@@ -634,6 +781,8 @@ def run_execute(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # The GitHub tokens may be kept in the project's .env (M5.1); a set variable wins.
+    load_tokens(PROJECT_ROOT)
 
     try:
         if args.command == "issue":
@@ -661,6 +810,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_budget(args)
         if args.command == "report":
             return run_report(args)
+        if args.command == "board":
+            return run_board(args)
         if args.command == "status":
             return run_status_command(args)
         if args.command == "events":

@@ -351,7 +351,10 @@ def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]
 
         if kind == "rate_limit_event":
             info = _dict(event.get("rate_limit_info"))
-            if info.get("status") not in (None, "allowed"):
+            if info.get("status") == "allowed_warning":  # near a limit, still allowed
+                add("step", f"rate limit warning ({info.get('rateLimitType', 'limit')})",
+                    detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="warn")
+            elif info.get("status") not in (None, "allowed"):
                 add("error", f"rate limited ({info.get('rateLimitType', 'limit')}: {info.get('status')})",
                     detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="error")
             continue

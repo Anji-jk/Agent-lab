@@ -253,7 +253,14 @@ def _detail(task: TaskProgress, states: Mapping[str, str]) -> str:
     return task.reason or ""
 
 
-def format_plan_progress(progress: PlanProgress) -> str:
+def format_plan_progress(progress: PlanProgress, next_step: str | None = None) -> str:
+    """The plan line and one line per task.
+
+    ``next_step`` is what ``run-plan`` would do next ("continue T2", "retry T1",
+    "start T3"), or "" when it would stop; ``status`` passes it, because the first
+    ready task is not always next: an interrupted task is continued first and a
+    failed one retried first. Without it, the first ready task is named.
+    """
     done = len(progress.with_state("done"))
     head = f"Plan: {done} of {len(progress.tasks)} done"
     running = [t.task_id for t in progress.with_state("running")]
@@ -261,9 +268,12 @@ def format_plan_progress(progress: PlanProgress) -> str:
         head += " · complete"
     elif running:
         head += f" · running {', '.join(running)}"
-    if progress.next_task is not None:
-        head += f" · next {progress.next_task}"
-    if progress.state == "stopped":
+    if next_step is None:
+        if progress.next_task is not None:
+            head += f" · next {progress.next_task}"
+    elif next_step:
+        head += f" · next: {next_step}"
+    if progress.state == "stopped" and not next_step:  # run-plan can go on: not stopped
         head += " · stopped: " + ", ".join(f"{t.task_id} {t.state}" for t in progress.stopped_by)
     states = {t.task_id: t.state for t in progress.tasks}
     lines = [head]

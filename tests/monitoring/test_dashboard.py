@@ -27,6 +27,14 @@ def jsonl(path, rows):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
 
+LIVE_PID = 4242
+
+
+def running_t1(pid):
+    """T1's process is alive: its command line is T1's run-task (M5.0)."""
+    return f"python -m orchestrator run-task {RUN} T1" if pid == LIVE_PID else None
+
+
 @pytest.fixture
 def lab(tmp_path, monkeypatch):
     """A run with a plan, T1 being tested, T2 waiting for T1, and event files for both sides."""
@@ -46,7 +54,7 @@ def lab(tmp_path, monkeypatch):
         "planner": {"run_id": f"{RUN}-plan", "status": "succeeded", "total_cost_usd": 0.085,
                     "num_turns": 5},
     })
-    save_task(runs, RUN, "T1", {"title": "Add stats", "complexity": "small",
+    save_task(runs, RUN, "T1", {"title": "Add stats", "complexity": "small", "pid": LIVE_PID,
                                 "roles": {"builder": "builder: sonnet, low effort, 10 turns, $0.60"}})
     update_task(runs, RUN, "T1", {"status": "building"})
     update_task(runs, RUN, "T1", {"status": "testing"})
@@ -66,7 +74,7 @@ def lab(tmp_path, monkeypatch):
         {"at": "2026-10-22T10:00:00+00:00", "step": "task_started", "base_commit": "abc123"},
         {"at": "2026-10-22T10:00:01+00:00", "step": "suite_started", "command": ["pytest"]},
     ])
-    data = dash.DashboardData(runs, plans, runner_script=script)
+    data = dash.DashboardData(runs, plans, runner_script=script, get_command_line=running_t1)
     return {"data": data, "runs": runs, "plans": plans, "script": script, "agents": agents}
 
 
@@ -283,3 +291,59 @@ def test_dashboard_command_prints_its_address_and_stops_on_ctrl_c(cli_lab, capsy
 def test_dashboard_on_a_busy_port_explains_itself(cli_lab, capsys, server):
     code = run_cli(cli_lab, "dashboard", "--port", str(server.server_address[1]), "--no-browser")
     assert code == cli.EXIT_ERROR and "could not listen" in capsys.readouterr().err
+
+
+# --- M5.0: a task whose process has gone is shown as interrupted -------------------------------
+
+
+def gone(pid):
+    return None
+
+
+def test_a_task_whose_process_has_gone_shows_as_interrupted(lab):
+    data = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"],
+                              get_command_line=gone)
+    run = data.run(RUN)
+    t1 = run["tasks"][0]
+    assert t1["status"] == "interrupted" and t1["active_role"] is None
+    assert t1["interrupted"] == f"Stopped while testing: its process ({LIVE_PID}) is no longer running."
+    assert run["active"] is False
+
+
+def test_the_open_step_of_an_interrupted_task_is_not_live(lab):
+    alive = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"],
+                               get_command_line=running_t1)
+    dead = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"],
+                              get_command_line=gone)
+    # live = the page shows "running for ..."; not live = "stopped before this finished"
+    assert alive.source_live(RUN, ["T1", "orchestrator"]) is True
+    assert dead.source_live(RUN, ["T1", "orchestrator"]) is False
+
+
+def test_a_running_task_still_shows_its_stage(lab):
+    t1 = lab["data"].run(RUN)["tasks"][0]
+    assert (t1["status"], t1["active_role"], t1["interrupted"]) == ("testing", "tester", None)
+
+
+def test_a_process_check_is_reused_for_a_few_seconds(lab, monkeypatch):
+    calls = []
+
+    def counted(pid):
+        calls.append(pid)
+        return running_t1(pid)
+
+    clock = [100.0]
+    monkeypatch.setattr(dash.time, "monotonic", lambda: clock[0])
+    data = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"],
+                              get_command_line=counted)
+    data.run(RUN)
+    data.run(RUN)
+    assert calls == [LIVE_PID]  # the page refreshes every 2 s; one PowerShell, not one per refresh
+    clock[0] += dash.COMMAND_LINE_SECONDS + 0.1
+    data.run(RUN)
+    assert calls == [LIVE_PID, LIVE_PID]
+
+
+def test_the_page_marks_an_interrupted_task():
+    js = (dash.STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    assert 'status === "interrupted"' in js and '"Interrupted"' in js

@@ -107,8 +107,9 @@ class GitHubClient:
         self,
         path: str,
         payload: dict[str, Any],
+        method: str = "POST",
     ) -> Any:
-        """Send an authenticated JSON POST request."""
+        """Send an authenticated JSON request (POST, or PATCH since M5.3)."""
         if not self.token:
             raise GitHubAPIError(
                 "A GITHUB_TOKEN is required for write operations."
@@ -126,7 +127,7 @@ class GitHubClient:
                 "X-GitHub-Api-Version": "2022-11-28",
                 "Authorization": f"Bearer {self.token}",
             },
-            method="POST",
+            method=method,
         )
 
         try:
@@ -187,3 +188,40 @@ class GitHubClient:
         if not isinstance(result, list):
             raise GitHubAPIError("Unexpected response when adding labels.")
         return result
+
+    # --- M5.2: the task Issues ---------------------------------------------------------------
+
+    def create_issue(self, title: str, body: str) -> dict[str, Any]:
+        """Create an Issue; returns it (with its ``id`` and ``number``)."""
+        if not title.strip():
+            raise ValueError("An Issue needs a title.")
+        result = self._post_json("issues", {"title": title, "body": body})
+        if not isinstance(result, dict) or not isinstance(result.get("id"), int) \
+                or not isinstance(result.get("number"), int):
+            raise GitHubAPIError("Unexpected response when creating an Issue.")
+        return result
+
+    def add_sub_issue(self, parent_number: int, sub_issue_id: int) -> None:
+        """Make the Issue with this ``id`` (not its number) a sub-issue of the parent."""
+        if parent_number < 1 or sub_issue_id < 1:
+            raise ValueError("Issue numbers and ids are positive.")
+        self._post_json(f"issues/{parent_number}/sub_issues", {"sub_issue_id": sub_issue_id})
+
+    def list_sub_issues(self, parent_number: int, max_pages: int = 10) -> list[dict[str, Any]]:
+        """The parent's sub-issues, with their bodies."""
+        found: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            items = self._get(f"issues/{parent_number}/sub_issues?per_page=100&page={page}")
+            if not isinstance(items, list):
+                raise GitHubAPIError("Unexpected response when listing sub-issues.")
+            found += [i for i in items if isinstance(i, dict)]
+            if len(items) < 100:
+                break
+        return found
+
+    def close_issue(self, number: int) -> None:
+        """Close an Issue as completed (M5.3: a task that is done)."""
+        if number < 1:
+            raise ValueError("Issue number must be positive.")
+        self._post_json(f"issues/{number}", {"state": "closed", "state_reason": "completed"},
+                        method="PATCH")

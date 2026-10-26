@@ -68,7 +68,7 @@
     if (ACTIVE.has(status)) return "running";
     if (status === "done") return "ok";
     if (["failed", "needs_review", "cancelled"].includes(status)) return "bad";
-    if (status === "paused") return "warn";
+    if (status === "paused" || status === "interrupted") return "warn";
     return "idle";
   }
   const chipTone = (tone) => (tone === "idle" ? "" : tone);
@@ -340,6 +340,9 @@
     }
     const why = { failed: "Why it failed", needs_review: "Why it needs review", cancelled: "Cancelled" };
     if (failed && t.reasons.length) parts.push(card(why[t.status], list(t.reasons), t.status === "cancelled" ? "warn" : "bad"));
+    if (t.status === "interrupted" && t.interrupted) {
+      parts.push(card("Interrupted", list([t.interrupted, "run-plan again, or run-task --continue, takes it up from where it stopped."]), "warn"));
+    }
     parts.push(tab === "orchestrator" ? orchestratorCard(t) : roleCard(t, tab));
     return parts.filter(Boolean);
   }
@@ -454,8 +457,13 @@
   }
 
   // ---- errors and the refresh loop ---------------------------------------------------
-  function showError(message) { const e = $("error"); e.textContent = message; e.hidden = false; }
-  function clearError() { $("error").hidden = true; }
+  // A closed notice stays closed while the same failure repeats on every refresh.
+  function showError(message) {
+    if (message === S.dismissedError) return;
+    $("error-text").textContent = message; $("error").hidden = false;
+  }
+  function clearError() { $("error").hidden = true; S.dismissedError = null; }
+  function dismissError() { S.dismissedError = $("error-text").textContent; $("error").hidden = true; }
 
   async function loadRun() {
     if (!S.runId) return;
@@ -484,6 +492,7 @@
   }
 
   async function start() {
+    $("error-close").addEventListener("click", dismissError);
     $("run").addEventListener("change", (e) => {
       S.runId = e.target.value; S.run = null; S.follow = true; S.sel = { task: null, tab: null };
       S.signature = ""; tick();

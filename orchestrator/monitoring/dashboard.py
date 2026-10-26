@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +53,7 @@ STATIC_FILES = {
 }
 TABS = (*ROLE_NAMES, "orchestrator")
 MAX_RUNS_LISTED = 100
+COMMAND_LINE_SECONDS = 5.0  # how long a process check is reused (M5.0)
 
 # What each agent waits for, shown on a tab that has not started yet.
 WAITS_FOR = {
@@ -94,10 +97,47 @@ class DashboardData:
     """Everything the page asks for, read from disk on every request."""
 
     def __init__(self, runs_dir: Path, plans_dir: Path,
-                 runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT):
+                 runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
+                 get_command_line: Callable[[int], str | None] | None = None):
         self.runs_dir = Path(runs_dir)
         self.plans_dir = Path(plans_dir)
         self.runner_script = Path(runner_script)
+        self._get_command_line = get_command_line
+        self._lines: dict[int, tuple[float, str | None]] = {}
+        self._lines_lock = threading.Lock()
+
+    # -- is a task's process still running? (M5.0) --
+    def _command_line(self, pid: int) -> str | None:
+        """A process's command line, remembered for a few seconds.
+
+        On Windows each look starts PowerShell (about a second), and the page
+        asks every 2 seconds, so the answer is kept briefly.
+        """
+        now = time.monotonic()
+        with self._lines_lock:
+            cached = self._lines.get(pid)
+            if cached and now - cached[0] < COMMAND_LINE_SECONDS:
+                return cached[1]
+        if self._get_command_line is None:
+            from orchestrator.execution.cancel import command_line
+            self._get_command_line = command_line
+        line = self._get_command_line(pid)
+        with self._lines_lock:
+            self._lines[pid] = (now, line)
+        return line
+
+    def _alive(self, run_id: str, task_id: str, record: dict[str, Any]) -> tuple[bool, str]:
+        """For a task whose record is at a stage: is its process still this task's?
+
+        The record alone cannot say: a process killed by Ctrl+C, a closed window
+        or a sleeping laptop leaves it at its stage. Plan progress (M4.1) asks
+        the same question for status.
+        """
+        # Imported here: plan progress imports execution modules that import monitoring.
+        from orchestrator.scheduling.plan_progress import process_liveness
+        check = process_liveness(self.runs_dir, run_id, get_command_line=self._command_line,
+                                 runner_script=self.runner_script)
+        return check(task_id, record)
 
     # -- the list of runs --
     def runs(self) -> list[dict[str, Any]]:
@@ -182,6 +222,11 @@ class DashboardData:
               record: dict[str, Any] | None, records: dict[str, dict[str, Any]],
               now: datetime) -> dict[str, Any]:
         status = record["status"] if record else "not started"
+        interrupted = None
+        if record and (status in ACTIVE_STATUSES or status == "pending"):
+            alive, why = self._alive(run_id, task_id, record)
+            if not alive:
+                status, interrupted = "interrupted", f"Stopped while {record['status']}: {why}."
         depends = (planned or record or {}).get("depends_on") or []
         complexity = (planned or record or {}).get("complexity")
         settings: dict[str, str] = {}
@@ -217,6 +262,7 @@ class DashboardData:
             "active_role": active,
             "cost_usd": cost,
             "reasons": (record or {}).get("reasons") or [],
+            "interrupted": interrupted,
             "commit": (record or {}).get("commit"),
             "branch": (record or {}).get("branch"),
             "worktree_path": (record or {}).get("worktree_path"),
@@ -268,7 +314,9 @@ class DashboardData:
         if record is None:
             return False
         if tab == "orchestrator":
-            return record["status"] in ACTIVE_STATUSES or record["status"] == "pending"
+            if record["status"] not in ACTIVE_STATUSES and record["status"] != "pending":
+                return False
+            return self._alive(run_id, task_id, record)[0]
         view = progress.task_agent_view(run_id, task_id, tab, record, self.runner_script,
                                         datetime.now(timezone.utc))
         return view.state in ("starting", "running")

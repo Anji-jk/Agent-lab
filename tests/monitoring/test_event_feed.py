@@ -204,6 +204,14 @@ def test_a_rate_limit_that_bites_is_shown(tmp_path):
     assert item.kind == "error" and "rate limited" in item.title
 
 
+def test_a_rate_limit_warning_is_a_warning_not_an_error(tmp_path):
+    stream = [{"type": "rate_limit_event",
+               "rate_limit_info": {"status": "allowed_warning", "rateLimitType": "seven_day"}}]
+    (item,) = ef.agent_items(write_stream(tmp_path / "rlw", stream))
+    assert item.kind == "step" and item.status == "warn"
+    assert item.title == "rate limit warning (seven_day)"
+
+
 # --- the cursor ---------------------------------------------------------------------------
 
 
