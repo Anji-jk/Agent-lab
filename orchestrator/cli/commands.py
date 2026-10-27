@@ -49,6 +49,7 @@ from orchestrator.records.task_registry import list_tasks, load_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
+from orchestrator.scheduling.task_process import ProcessLauncher
 from orchestrator.scheduling.run_plan import (
     describe_next, format_step, next_action, run_plan as work_through_plan,
 )
@@ -78,6 +79,7 @@ EXIT_RUN_TIMED_OUT = 6
 EXIT_PLANNING_FAILED = 7  # planner failed, or returned an unusable plan
 EXIT_TASK_FAILED = 8  # a check caught a problem; nothing was committed
 EXIT_TASK_NEEDS_REVIEW = 9  # the task could not be judged; a person must look
+EXIT_INTERRUPTED = 130  # Ctrl+C, as a shell reports it
 
 EPILOG = """\
 exit codes:
@@ -438,7 +440,8 @@ def run_run_task(args: argparse.Namespace) -> int:
         print(f"Continuing {args.task_id} of run {args.run_id} from where it stopped; "
               "fresh agents call Claude and may take a while...", file=sys.stderr)
         record = continue_task(args.run_id, args.task_id, plans_dir=args.plans_dir,
-                               runs_dir=args.runs_dir, repo_path=args.repo_path)
+                               runs_dir=args.runs_dir, repo_path=args.repo_path,
+                               worktree_root=args.worktree_root or default_worktree_root())
         display_task(record)
         print("\nNothing was pushed or merged.")
         return {"done": EXIT_OK, "failed": EXIT_TASK_FAILED}.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
@@ -474,11 +477,20 @@ def run_run_plan(args: argparse.Namespace) -> int:
         print(format_step(action, task_id, step), flush=True)
         board.sync(starting=task_id if step is None else None)
 
-    result = work_through_plan(
-        args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
-        repo_path=args.repo_path, worktree_root=args.worktree_root or default_worktree_root(),
-        on_step=show,
-    )
+    worktree_root = args.worktree_root or default_worktree_root()
+    # Each task runs as its own process (M7.2); its output goes to runs/<run>/run-plan-logs/.
+    launch = ProcessLauncher(args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
+                             repo_path=args.repo_path, worktree_root=worktree_root)
+    try:
+        result = work_through_plan(
+            args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
+            repo_path=args.repo_path, worktree_root=worktree_root, on_step=show, launch=launch,
+        )
+    except KeyboardInterrupt:
+        print(f"\nStopped by Ctrl+C. The task that was running is interrupted; run "
+              f"python -m orchestrator run-plan {args.run_id} again and it continues from "
+              "where it stopped. Nothing was pushed or merged.", file=sys.stderr)
+        return EXIT_INTERRUPTED
     # Not after Ctrl+C: this process still owns the stopped task until it exits, so it
     # would look running. The next run-plan, or board sync, moves its card.
     board.sync()

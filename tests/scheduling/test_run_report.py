@@ -176,7 +176,8 @@ def test_run_plan_saves_the_report_when_it_stops(world, agents, monkeypatch, cap
     real = rp.run_plan
 
     def fake_agents_run_plan(run_id, **options):
-        return real(run_id, **{**options, "runner_script": world["script"],
+        # launch=None: the stand-in agents run in this process, not in child processes (M7.2).
+        return real(run_id, **{**options, "launch": None, "runner_script": world["script"],
                                "invoke_runner": per_task(agents), "get_command_line": no_process,
                                "env": {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}})
 

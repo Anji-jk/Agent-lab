@@ -212,3 +212,14 @@ def test_show_task_says_where_the_work_went(world, agents, capsys):
     from orchestrator.cli.display import display_task
     display_task(run(world, agents))
     assert f"Merged into: {BRANCH} (fast-forward)" in capsys.readouterr().out
+
+
+def test_a_continued_task_puts_the_run_branch_in_the_worktree_folder(world, agents):
+    """Found in 7.2: --continue did not pass the worktree folder on, so the run's branch
+    got its worktree beside the repository instead."""
+    from task_runner_support import resume, stop_at  # pyright: ignore[reportMissingImports]
+    stop_at(world, agents, "reviewer")
+    record = resume(world, agents, worktree_root=world["wt"])
+    assert record["status"] == "done"
+    saved = json.loads(ig.integration_path(world["runs"], RUN_ID).read_text())
+    assert ig.Path(saved["worktree_path"]).parent == ig.Path(world["wt"]).resolve()

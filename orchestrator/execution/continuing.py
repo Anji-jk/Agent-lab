@@ -148,8 +148,13 @@ def continue_task(
     test_command: tuple[str, ...] | None = None,
     env: dict[str, str] | None = None,
     is_alive: IsAlive | None = None,
+    worktree_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Run a stopped task again from the stage it reached; return its new record."""
+    """Run a stopped task again from the stage it reached; return its new record.
+
+    ``worktree_root``: where the run's branch gets its worktree if this task's merge is
+    the run's first (M7.1); the task itself keeps the worktree it already has.
+    """
     # Imported here: plan progress imports this package's background module.
     from orchestrator.scheduling.left_behind import left_behind
     from orchestrator.scheduling.plan_progress import process_liveness
@@ -187,6 +192,7 @@ def continue_task(
             runner_script=runner_script, invoke_runner=invoke_runner,
             test_command=test_command, env=env, attempt=attempt + 1,
             previous_attempts=previous, continue_from=continue_from,
+            worktree_root=worktree_root,
         )
     except BaseException:
         if not (task_directory(runs_dir, run_id, task_id) / TASK_RECORD_NAME).exists():

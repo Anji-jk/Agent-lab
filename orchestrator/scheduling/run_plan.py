@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +57,9 @@ from orchestrator.execution.diagnose import when_text
 from orchestrator.execution.retry import retry_problem, retry_task
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.run_registry import run_directory, utc_now
-from orchestrator.records.task_registry import list_tasks
+from orchestrator.records.run_registry import RunRegistryError
+from orchestrator.records.task_registry import FINAL_STATUSES, list_tasks, load_task
+from orchestrator.scheduling.task_process import Ended, InProcessLauncher, Launcher, wait
 from orchestrator.scheduling.plan_progress import (
     CommandLine,
     PlanProgress,
@@ -65,6 +68,8 @@ from orchestrator.scheduling.plan_progress import (
 )
 
 LOCK_FILE_NAME = "run-plan.json"
+SETTLE_SECONDS = 15.0      # how long a task's final status may take to appear (cancel)
+SETTLE_POLL_SECONDS = 0.5
 ACTIONS = ("run", "retry", "continue")
 
 
@@ -221,8 +226,13 @@ def run_plan(
     env: dict[str, str] | None = None,
     get_command_line: CommandLine | None = None,
     on_step: OnStep | None = None,
+    launch: Launcher | None = None,
 ) -> PlanRun:
-    """Run the plan's tasks one at a time until it is complete or something stops it."""
+    """Run the plan's tasks one at a time until it is complete or something stops it.
+
+    ``launch`` starts each step: the CLI passes a ``ProcessLauncher`` (M7.2), so each
+    task runs as its own process; without one the step runs here, in this process.
+    """
     plan = load_task_plan(plans_dir, run_id)
     lock = acquire_lock(runs_dir, run_id, get_command_line)
     result = PlanRun(run_id)
@@ -231,6 +241,9 @@ def run_plan(
                   test_command=test_command, env=env)
     # Each task can be run, continued and retried; more steps than that is a bug, not a plan.
     limit = 4 * len(plan["tasks"]) + 2
+    launch = launch or InProcessLauncher(
+        lambda action, task_id: _do(action, run_id, task_id, worktree_root, get_command_line,
+                                    common))
     try:
         while True:
             progress = plan_progress(plan, runs_dir, run_id, get_command_line=get_command_line,
@@ -261,15 +274,18 @@ def run_plan(
             action, task_id = decision
             if on_step:
                 on_step(action, task_id, None)
-            try:
-                record = _do(action, run_id, task_id, worktree_root, get_command_line, common)
-            except ExecutionRefused as exc:
-                result.stopped = f"{task_id} was not {_past(action)}: {exc}"
-                result.refused = True
+            before = _seen(runs_dir, run_id, task_id)
+            ended = wait(launch(action, task_id))
+            record = _settled(runs_dir, run_id, task_id, _record(runs_dir, run_id, task_id))
+            problem = _not_finished(action, task_id, ended, before, record)
+            if problem is not None:
+                result.stopped = problem
+                result.refused = ended.refused
                 result.progress = plan_progress(plan, runs_dir, run_id,
                                                 get_command_line=get_command_line,
                                                 runner_script=Path(runner_script))
                 return result
+            assert record is not None
             reasons = record.get("reasons") or []
             step = Step(task_id, action, record["status"], int(record.get("attempt") or 1),
                         record.get("cost_usd"),
@@ -291,6 +307,52 @@ def _limit_resets(record: dict[str, Any]) -> str | None:
     return str(limit.get("resets_at") or "")
 
 
+def _record(runs_dir: Path, run_id: str, task_id: str) -> dict[str, Any] | None:
+    try:
+        return load_task(runs_dir, run_id, task_id)
+    except RunRegistryError:
+        return None
+
+
+def _settled(runs_dir: Path, run_id: str, task_id: str,
+             record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The record once its final status is in, waiting a little when it is not yet.
+
+    ``cancel`` stops a task's process first and writes "cancelled" right after; read
+    in between, the record would make a cancel look like a crash.
+    """
+    deadline = time.monotonic() + SETTLE_SECONDS
+    while (record is not None and record["status"] not in FINAL_STATUSES
+           and time.monotonic() < deadline):
+        time.sleep(SETTLE_POLL_SECONDS)
+        record = _record(runs_dir, run_id, task_id)
+    return record
+
+
+def _seen(runs_dir: Path, run_id: str, task_id: str) -> tuple[Any, ...] | None:
+    """Enough of a task's record to tell, afterwards, whether a step changed it."""
+    record = _record(runs_dir, run_id, task_id)
+    return None if record is None else (record.get("attempt"), record.get("updated_at"))
+
+
+def _not_finished(action: str, task_id: str, ended: Ended, before: tuple[Any, ...] | None,
+                  record: dict[str, Any] | None) -> str | None:
+    """Why the step left no final record (refused, or its process died), or None."""
+    log = f" Its output: {ended.log}" if ended.log else ""
+    if ended.refused:
+        return f"{task_id} was not {_past(action)}: {ended.error or 'it was refused.'}"
+    started = record is not None and (record.get("attempt"), record.get("updated_at")) != before
+    if not started:
+        why = ended.error or f"its process ended with exit code {ended.exit_code}."
+        return f"{task_id} was not {_past(action)}: {why}{log}"
+    assert record is not None
+    if record["status"] in FINAL_STATUSES:
+        return None
+    return (f"{task_id}'s process ended (exit code {ended.exit_code}) while the task was "
+            f"{record['status']}, without finishing it.{log} Run run-plan again: {task_id} "
+            "continues from where it stopped.")
+
+
 def _budget_reason(reasons: list[Any]) -> str:
     for reason in reasons:
         if str(reason).startswith("Run budget:"):
@@ -310,7 +372,7 @@ def _do(action: str, run_id: str, task_id: str, worktree_root: Path | None,
         return retry_task(run_id, task_id, worktree_root=worktree_root, **common)
     alive = process_liveness(common["runs_dir"], run_id, get_command_line=get_command_line,
                              runner_script=Path(common["runner_script"]))
-    return continue_task(run_id, task_id, is_alive=alive, **common)
+    return continue_task(run_id, task_id, is_alive=alive, worktree_root=worktree_root, **common)
 
 
 # --- showing it ---------------------------------------------------------------------------------

@@ -289,8 +289,6 @@ def generate_ai_plan(
             "number": task.issue_number,
             "title": task.title,
             "url": task.issue_url,
-            # Stored whole, so the builder, tester and reviewer can be given what
-            # the Issue actually asked for, not only the planner's reading of it.
             "description": task.description,
         },
         "config": {
