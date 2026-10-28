@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.execution.integration import load_integration
+from orchestrator.execution.integration import KIND_WORDS, describe_merge, load_integration
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.budget import format_budget, task_spent
 from orchestrator.monitoring.event_feed import mask_secrets
@@ -61,6 +61,7 @@ class TaskReport:
     commit: str | None
     branch: str | None
     attempts: tuple[AttemptReport, ...] = ()
+    merge: str | None = None       # how its work reached the run's branch (M7.6)
 
 
 @dataclass
@@ -77,6 +78,8 @@ class RunReport:
     head_commit: str | None = None
     next_step: str = ""
     budget: str | None = None
+    merges: list[str] = field(default_factory=list)          # "T1 fast-forward", in order
+    together: list[list[str]] = field(default_factory=list)  # tasks that ran at the same time
 
     @property
     def tasks_cost_usd(self) -> float:
@@ -145,6 +148,33 @@ def _attempts(runs_dir: Path, run_id: str, task_id: str, record: dict[str, Any],
     return tuple(found)
 
 
+def ran_together(spans: dict[str, list[tuple[datetime, datetime]]]) -> list[list[str]]:
+    """Groups of tasks whose working times overlapped, each in order of its first start.
+
+    Two tasks are in one group when one of their attempts overlapped, or when each
+    overlapped a third task's (M7.6).
+    """
+    group = {task_id: task_id for task_id in spans}
+
+    def root(task_id: str) -> str:
+        while group[task_id] != task_id:
+            task_id = group[task_id]
+        return task_id
+
+    ids = list(spans)
+    for i, first in enumerate(ids):
+        for second in ids[i + 1:]:
+            if any(a_start < b_end and b_start < a_end
+                   for a_start, a_end in spans[first] for b_start, b_end in spans[second]):
+                group[root(second)] = root(first)
+    found: dict[str, list[str]] = {}
+    for task_id in ids:
+        found.setdefault(root(task_id), []).append(task_id)
+    begins = {t: min(start for start, _ in spans[t]) for t in ids}
+    groups = [sorted(g, key=begins.__getitem__) for g in found.values() if len(g) > 1]
+    return sorted(groups, key=lambda g: begins[g[0]])
+
+
 def _detail(progress_task: Any, states: dict[str, str]) -> str | None:
     if progress_task.state == "done":
         return None
@@ -183,6 +213,7 @@ def build_report(
     starts: list[datetime] = []
     ends: list[datetime] = []
     last_done: tuple[datetime, dict[str, Any]] | None = None
+    spans: dict[str, list[tuple[datetime, datetime]]] = {}
     for task in progress.tasks:
         record = records.get(task.task_id)
         if record is None:
@@ -195,11 +226,15 @@ def build_report(
         report.tasks.append(TaskReport(
             task.task_id, task.title, task.state, _detail(task, states), spent,
             sum(seconds) if seconds else None, record.get("commit"), record.get("branch"),
-            attempts))
-        for number in range(1, attempt_of(record)):
-            archived = _archived(runs_dir, run_id, task.task_id, number)
+            attempts, describe_merge(record.get("merge"))))
+        worked = [_archived(runs_dir, run_id, task.task_id, n) for n in range(1, attempt_of(record))]
+        for archived in worked:
             if archived and _time(archived.get("created_at")):
                 starts.append(_time(archived["created_at"]))  # type: ignore[arg-type]
+        for one in [*worked, record]:
+            begin, end = _time((one or {}).get("created_at")), _time((one or {}).get("updated_at"))
+            if begin is not None and end is not None:
+                spans.setdefault(task.task_id, []).append((begin, end))
         for key, bucket in (("created_at", starts), ("updated_at", ends)):
             moment = _time(record.get(key))
             if moment is not None:
@@ -209,6 +244,7 @@ def build_report(
             if last_done is None or finished >= last_done[0]:
                 last_done = (finished, record)
 
+    report.together = ran_together(spans)
     if starts:
         report.started_at = min(starts).isoformat()
     if ends:
@@ -217,6 +253,8 @@ def build_report(
     if integration is not None:  # the run's own branch holds every merged task (M7.1)
         report.branch = integration["branch"]
         report.head_commit = integration.get("head") or integration.get("base_commit")
+        report.merges = [f"{m.get('task')} {KIND_WORDS.get(str(m.get('kind')), m.get('kind'))}"
+                         for m in integration.get("merges") or [] if isinstance(m, dict)]
     elif last_done is not None:
         report.branch, report.head_commit = last_done[1].get("branch"), last_done[1].get("commit")
 
@@ -224,7 +262,8 @@ def build_report(
     if decision is None:
         branch = report.branch or "the run's branch"
         report.next_step = (f"Review the work: git log --oneline {report.base_commit[:12]}..{branch}. "
-                            "Nothing was pushed or merged; that is for you to do.")
+                            "Nothing was pushed, and your own branches were not changed; merging "
+                            "the run's branch is for you to do.")
     elif isinstance(decision, str):
         report.next_step = decision
     else:
@@ -262,6 +301,10 @@ def format_report(report: RunReport) -> str:
                      f"(the run started from {report.base_commit[:12]})")
     else:
         lines.append(f"Branch:  none yet; no task has finished (base {report.base_commit[:12]})")
+    if report.merges:
+        lines.append(f"Merges:  {', '.join(report.merges)}")
+    for group in report.together:
+        lines.append(f"Together: {', '.join(group)} ran at the same time")
     planner = _money(report.planner_cost_usd)
     lines.append(f"Cost:    ${report.total_cost_usd:.4f} "
                  f"(planner {planner}, tasks ${report.tasks_cost_usd:.4f})")
@@ -281,6 +324,8 @@ def format_report(report: RunReport) -> str:
                      f"{_duration(task.seconds) if task.attempts else '-':>8}  {commit:<12}  {task.title}")
         if task.detail:
             lines.append(f"       {task.detail}")
+        if task.merge:
+            lines.append(f"       {task.merge}")
         if count > 1:
             for attempt in task.attempts:
                 why = f" - {attempt.reason}" if attempt.reason and attempt.status != "done" else ""

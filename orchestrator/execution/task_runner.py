@@ -10,7 +10,8 @@ Between agents the orchestrator checks the facts for itself (``task_checks``):
 which files changed, whether the full suite and the tester's named tests pass.
 ``task_agents.decide`` turns agent reports plus those facts into the status.
 Only a task that is ``done`` gets a commit, made by the orchestrator, on the
-task's own branch in the task's own worktree. Nothing is pushed or merged.
+task's own branch in the task's own worktree, and then merged into the run's
+branch (M7.1, ``integration``). Nothing is pushed.
 """
 
 from __future__ import annotations
@@ -29,11 +30,13 @@ from orchestrator.execution.diagnose import failure_reason
 from orchestrator.execution.integration import MergeProblem, integration_head, merge_task
 
 from orchestrator.execution import checks as tc
-from orchestrator.execution.budget import BudgetExhausted, budget_problem
+from orchestrator.execution.budget import (
+    BudgetExhausted, budget_problem, release_agent, reserve_agent,
+)
 from orchestrator.errors import ExecutionRefused
 from orchestrator.planning.profiles import RoleSettings, profile_for, role_settings
 from orchestrator.execution.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER, TEST_DIR, role
-from orchestrator.records.run_registry import RunRegistryError
+from orchestrator.records.run_registry import RunRegistryError, locked, run_directory, utc_now
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.task_events import NullLog, TaskLog
 from orchestrator.records.task_registry import (
@@ -143,22 +146,26 @@ def run_head(repo_path: Path, run_id: str, records: dict[str, dict[str, Any]], p
 
 
 def check_no_other_task_running(
-    task_id: str, records: dict[str, dict[str, Any]], is_alive: IsAlive
+    task_id: str, records: dict[str, dict[str, Any]], is_alive: IsAlive,
+    together: Callable[[str], bool] | None = None,
 ) -> None:
-    """Refuse while another task of the run is still running.
+    """Refuse while another task of the run is still running, unless the two may run together.
 
-    Two tasks started from the same head would put their work on two branches
-    again. A task whose process has gone (a closed window) does not count: it
-    left no commit, so it cannot split the chain.
+    ``together(other)`` says whether this task and ``other`` may run side by side: both
+    marked parallel-safe in the plan (M7.3), which the planner only allows for tasks that
+    are not ordered and share no file. Without it, a task runs alone.
+
+    A task whose process has gone (a closed window) does not count: it is not running.
     """
     for other, record in sorted(records.items()):
         if other == task_id or record.get("status") not in ACTIVE_STATUSES | {"pending"}:
             continue
         alive, why = is_alive(other, record)
-        if alive:
+        if alive and not (together and together(other)):
             raise TaskNotReady(
-                f"{other} is still running ({why}). A run's tasks share one branch, so "
-                f"they run one at a time; wait for {other} to finish or cancel it."
+                f"{other} is still running ({why}). {task_id} and {other} are not both marked "
+                f"parallel-safe in the plan, so they run one at a time; wait for {other} to "
+                "finish or cancel it."
             )
 
 
@@ -197,7 +204,10 @@ def prepare(
         # Imported here: the scheduling package imports this module's callers.
         from orchestrator.scheduling.plan_progress import process_liveness
         is_alive = process_liveness(runs_dir, run_id)
-    check_no_other_task_running(task_id, records, is_alive)
+    safe = {t["id"]: bool(t.get("parallel_safe")) for t in plan["tasks"]}
+    check_no_other_task_running(
+        task_id, records, is_alive,
+        together=lambda other: safe.get(task_id, False) and safe.get(other, False))
 
     base = plan["config"]["base_commit"]
     if not tc.commit_exists(repo_path, base):
@@ -227,12 +237,35 @@ def limit_reason(name: str, reason: str) -> str:
             "it goes on from the stage it reached.")
 
 
+GIT_LOCK_FOLDER = "git-lock"   # runs/<run>/git-lock: tasks side by side take turns at git (M7.3)
+GIT_LOCK_SECONDS = 300
+
+
+def git_lock(runs_dir: Path, run_id: str):
+    """One task at a time creates its worktree or commits; the work itself runs side by side.
+
+    Git takes its own locks, but two tasks making a worktree or a commit in the same
+    instant can still fail on them ("Unable to create ... .lock"). Taking turns costs
+    a second or two against tasks that run for many minutes.
+    """
+    return locked(run_directory(Path(runs_dir), run_id) / GIT_LOCK_FOLDER,
+                  timeout=GIT_LOCK_SECONDS)
+
+
+def _liveness(runs_dir: Path, run_id: str, runner_script: Path) -> IsAlive:
+    """Whether another task's process is still running (imported here: scheduling imports this module)."""
+    from orchestrator.scheduling.plan_progress import process_liveness
+    return process_liveness(runs_dir, run_id, runner_script=Path(runner_script))
+
+
 class _Pipeline:
     def __init__(self, ctx: TaskContext, run_id: str, runs_dir: Path, worktree: Path,
                  runner_script: Path, invoke_runner, test_command: tuple[str, ...], env,
                  log: TaskLog | NullLog | None = None, attempt: int = 1,
-                 feedback: str | None = None, earlier: str | None = None):
+                 feedback: str | None = None, earlier: str | None = None,
+                 is_alive: IsAlive | None = None):
         self.ctx, self.run_id, self.runs_dir = ctx, run_id, runs_dir
+        self.is_alive = is_alive or _liveness(runs_dir, run_id, runner_script)
         self.attempt, self.feedback, self.earlier = attempt, feedback, earlier
         self.reused: dict[str, dict[str, Any]] = {}  # agents' results kept from the stopped attempt
         self.test_timeout = TEST_TIMEOUT_SECONDS
@@ -262,8 +295,9 @@ class _Pipeline:
 
     def call(self, name: str, prompt: str) -> runner_adapter.RunnerOutcome:
         settings = self.ctx.settings[name]
-        problem = budget_problem(self.runs_dir, self.run_id, name, settings.max_budget_usd,
-                                 self.runner_script)
+        # Checked and reserved in one step, counting agents running in other tasks (M7.4).
+        problem = reserve_agent(self.runs_dir, self.run_id, self.task["id"], name, self.attempt,
+                                settings.max_budget_usd, self.is_alive, self.runner_script)
         if problem:  # not started, so nothing was spent on it (M4.6)
             self.budget_stopped = True
             self.findings.infrastructure.append(problem)
@@ -272,23 +306,26 @@ class _Pipeline:
         agent_run_id = attempt_agent_run_id(self.run_id, self.task["id"], name, self.attempt)
         self.log.emit("agent_started", role=name, agent_run_id=agent_run_id,
                       settings=settings.describe())
-        with tempfile.TemporaryDirectory(prefix="agent-lab-task-") as scratch:
-            prompt_file = Path(scratch) / f"{name}-prompt.txt"
-            prompt_file.write_text(prompt, encoding="utf-8")
-            outcome = self.invoke_runner(
-                run_id=agent_run_id,
-                worktree_path=self.worktree,
-                prompt_file=prompt_file,
-                timeout_seconds=settings.timeout_seconds,
-                model=settings.model,
-                max_turns=settings.max_turns,
-                effort=settings.effort,
-                max_budget_usd=settings.max_budget_usd,
-                keep_result_text=True,
-                runner_script=self.runner_script,
-                role=name,
-                **role(name).runner_options(),
-            )
+        try:
+            with tempfile.TemporaryDirectory(prefix="agent-lab-task-") as scratch:
+                prompt_file = Path(scratch) / f"{name}-prompt.txt"
+                prompt_file.write_text(prompt, encoding="utf-8")
+                outcome = self.invoke_runner(
+                    run_id=agent_run_id,
+                    worktree_path=self.worktree,
+                    prompt_file=prompt_file,
+                    timeout_seconds=settings.timeout_seconds,
+                    model=settings.model,
+                    max_turns=settings.max_turns,
+                    effort=settings.effort,
+                    max_budget_usd=settings.max_budget_usd,
+                    keep_result_text=True,
+                    runner_script=self.runner_script,
+                    role=name,
+                    **role(name).runner_options(),
+                )
+        finally:  # the agent has ended (or never ran): its cap is free for the others
+            release_agent(self.runs_dir, self.run_id, self.task["id"])
         self.agents[name] = {
             "outcome": outcome.outcome,
             **_agent_metrics(outcome.result),
@@ -545,7 +582,10 @@ def run_task(
     ctx = prepare(run_id, task_id, plans_dir=plans_dir, runs_dir=runs_dir, repo_path=repo_path)
     task, plan = ctx.task, ctx.plan
     start = (continue_from or {}).get("stage", "building")
-    if continue_from and continue_from["base_commit"] != ctx.base_commit:
+    # With the run's branch (M7.1) a task that started earlier is merged into it, so tasks
+    # run side by side may finish in any order; only a run from before that has one chain.
+    if (continue_from and continue_from["base_commit"] != ctx.base_commit
+            and integration_head(runs_dir, run_id, repo_path) is None):
         raise TaskNotReady(
             f"{task_id} started from {continue_from['base_commit'][:12]}, but the run has "
             f"moved on to {ctx.base_commit[:12]} since (another task finished). Continuing "
@@ -555,8 +595,9 @@ def run_task(
         raise ExecutionRefused(f"Runner script not found: {runner_script}")
     test_timeout = test_timeout_seconds()
     first = {"building": BUILDER, "testing": TESTER, "reviewing": REVIEWER}[start]
+    alive = _liveness(runs_dir, run_id, Path(runner_script))
     problem = budget_problem(runs_dir, run_id, first, ctx.settings[first].max_budget_usd,
-                             Path(runner_script))
+                             Path(runner_script), task_id, alive)
     if problem:  # refused before anything is created: the task stays as it was
         raise BudgetExhausted(problem)
 
@@ -576,7 +617,8 @@ def run_task(
         "title": task["title"],
         "complexity": task["complexity"],
         "depends_on": task["depends_on"],
-        "base_commit": ctx.base_commit,
+        # A continued task keeps the base its worktree was made from, not the run's head now.
+        "base_commit": (continue_from or {}).get("base_commit", ctx.base_commit),
         "roles": {name: s.describe() for name, s in ctx.settings.items()},
         # The process running this pipeline, for cancel and for spotting one that died.
         "pid": os.getpid(),
@@ -592,11 +634,12 @@ def run_task(
             if not worktree.is_dir():
                 raise FileNotFoundError(f"The worktree {worktree} no longer exists.")
         else:
-            branch, worktree = create_worktree(
-                repo_path, plan["issue"]["number"],
-                f"{run_id}-{task_id.lower()}" + (f"-r{attempt}" if attempt > 1 else ""),
-                base_ref=ctx.base_commit, worktree_root=worktree_root,
-            )
+            with git_lock(runs_dir, run_id):
+                branch, worktree = create_worktree(
+                    repo_path, plan["issue"]["number"],
+                    f"{run_id}-{task_id.lower()}" + (f"-r{attempt}" if attempt > 1 else ""),
+                    base_ref=ctx.base_commit, worktree_root=worktree_root,
+                )
     except Exception as exc:
         log.emit("worktree_failed", error=str(exc))
         log.emit("task_finished", status="failed", cost_usd=0)
@@ -606,9 +649,10 @@ def run_task(
     update_task(runs_dir, run_id, task_id, {"branch": branch, "worktree_path": str(worktree)})
     log.emit("worktree_created", branch=branch, path=str(worktree))
 
+    merging = False
     pipeline = _Pipeline(ctx, run_id, runs_dir, worktree, Path(runner_script),
                          invoke_runner, test_command, env, log, attempt, feedback,
-                         (continue_from or {}).get("earlier"))
+                         (continue_from or {}).get("earlier"), alive)
     pipeline.test_timeout = test_timeout
     try:
         if start == "building":
@@ -623,13 +667,18 @@ def run_task(
         log.emit("decided", status=status, reasons=reasons)
         commit, merge = None, None
         if status == ta.DONE:
-            commit = tc.commit_all(worktree, _commit_message(plan, task, run_id))
+            with git_lock(runs_dir, run_id):
+                commit = tc.commit_all(worktree, _commit_message(plan, task, run_id))
             if tc.changed_paths(worktree):
                 status, reasons = ta.NEEDS_REVIEW, ["Files remained uncommitted after the commit."]
                 commit = None
                 log.emit("commit_incomplete", reasons=reasons)
             else:
                 log.emit("committed", commit=commit, branch=branch)
+                # status shows "merging" meanwhile (M7.6): a real merge runs the full suite,
+                # and a merge may first wait for another task's.
+                update_task(runs_dir, run_id, task_id, {"merging": utc_now()})
+                merging = True
                 status, reasons, merge = _merge(run_id, task, commit, plan=plan, ctx=ctx,
                                                 runs_dir=runs_dir, repo_path=repo_path,
                                                 worktree_root=worktree_root,
@@ -654,6 +703,7 @@ def run_task(
         **({"budget_stop": True} if pipeline.budget_stopped else {}),
         **({"limit_stop": pipeline.limit_stop} if pipeline.limit_stop else {}),
         **({"merge": merge} if merge else {}),
+        **({"merging": None} if merging else {}),
         "checks": pipeline.checks,
         "findings": {k: getattr(pipeline.findings, k) for k in pipeline.findings.__dataclass_fields__},
         "cost_usd": _total_cost(pipeline.agents),

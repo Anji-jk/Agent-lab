@@ -431,7 +431,30 @@ def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]
 
 _PAIRS = {"agent_started": "agent_finished", "suite_started": "suite_finished",
           "named_tests_started": "named_tests_finished"}
+_PAIRS["merge_started"] = "merged"  # M7.6: or merge_failed
 _ENDINGS = {end: start for start, end in _PAIRS.items()}
+_ENDINGS["merge_failed"] = "merge_started"
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _merge_outcome(entry: dict[str, Any]) -> dict[str, Any]:
+    """The result of a merge into the run's branch, for its merge_started item."""
+    if entry.get("step") == "merge_failed":
+        reason = str(entry.get("reason") or "")
+        return {"status": "error", "summary": f"not merged ({entry.get('kind')})",
+                "detail": mask_secrets(reason), "at": entry.get("at")}
+    kind = entry.get("kind")
+    suite = _as_dict(entry.get("suite"))
+    seconds = suite.get("seconds")
+    took = f" in {seconds:.1f}s" if isinstance(seconds, (int, float)) else ""
+    summary = {"fast-forward": "fast-forward, no new suite run",
+               "merge": f"real merge, full suite passed{took}",
+               "already": "already on the run's branch"}.get(str(kind), str(kind))
+    return {"status": "ok", "summary": f"{summary} · {str(entry.get('head', ''))[:10]}",
+            "detail": mask_secrets(str(suite.get("output_tail") or "")), "at": entry.get("at")}
 
 
 def _lines(values: object) -> str:
@@ -527,6 +550,13 @@ def _step_item(index: int, entry: dict[str, Any]) -> Item:
     if step == "committed":
         return item("step", f"committed {str(entry.get('commit', ''))[:10]} on {entry.get('branch')}",
                     str(entry.get("commit", "")), "ok")
+    if step == "merge_started":
+        return item("step", "merging into the run's branch", str(entry.get("commit", "")),
+                    awaits_result=True)
+    if step in ("merged", "merge_failed"):  # without its start (not expected)
+        outcome = _merge_outcome(entry)
+        return item("step" if step == "merged" else "error", f"merge: {outcome['summary']}",
+                    outcome["detail"], outcome["status"])
     if step in ("commit_incomplete", "pipeline_crashed"):
         return item("error", step.replace("_", " "),
                     str(entry.get("error") or _lines(entry.get("reasons"))), "error")
@@ -559,7 +589,9 @@ def orchestrator_items(path: Path) -> list[Item]:
             key = (_ENDINGS[step], str(entry.get("role", "")))
             started = open_steps.pop(key, None)
             if started is not None:
-                if step == "agent_finished":
+                if step in ("merged", "merge_failed"):
+                    started.result = _merge_outcome(entry)
+                elif step == "agent_finished":
                     ok = entry.get("outcome") == "success"
                     parts = [str(entry.get("outcome", "")).replace("_", " ")]
                     if _money(entry.get("cost_usd")):

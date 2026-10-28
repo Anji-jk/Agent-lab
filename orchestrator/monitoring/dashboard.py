@@ -36,6 +36,7 @@ from orchestrator.monitoring import event_feed
 from orchestrator.monitoring import progress
 
 from orchestrator.execution import runner_adapter
+from orchestrator.execution.integration import branch_line, describe_merge, load_integration
 from orchestrator.planning.profiles import profile_for, role_settings
 from orchestrator.execution.roles import ROLE_NAMES, role
 from orchestrator.records.run_registry import RunRegistryError, validate_run_id
@@ -199,6 +200,7 @@ class DashboardData:
 
         issue = (plan or {}).get("issue") or {}
         url = issue.get("url")
+        integration = load_integration(self.runs_dir, run_id)
         return {
             "run_id": run_id,
             "issue": {
@@ -211,7 +213,16 @@ class DashboardData:
             "base_commit": ((plan or {}).get("config") or {}).get("base_commit"),
             "planner": _agent_dict(planner) if planner else None,
             "tasks": tasks,
-            "active": any(t["active_role"] for t in tasks)
+            # Several tasks may run at once (M7.3); each finished one is merged (M7.1).
+            "running": [t["id"] for t in tasks if t["status"] in ACTIVE_STATUSES],
+            "integration": None if integration is None else {
+                "branch": integration.get("branch"),
+                "head": integration.get("head") or integration.get("base_commit"),
+                "line": branch_line(integration),
+                "merges": [{"task": m.get("task"), "kind": m.get("kind"), "at": m.get("at")}
+                           for m in integration.get("merges") or [] if isinstance(m, dict)],
+            },
+            "active": any(t["active_role"] or t["merging"] for t in tasks)
                       or bool(planner and planner.state in ("starting", "running")),
             "cost_usd": round(sum(t["cost_usd"] for t in tasks)
                               + ((planner.cost_usd or 0.0) if planner else 0.0), 6),
@@ -248,7 +259,10 @@ class DashboardData:
                 "purpose": role(name).purpose,
                 "waits_for": WAITS_FOR[name],
             }
-        active = progress.STAGE_ROLE.get(status) if status in ACTIVE_STATUSES else None
+        # Merging (M7.6): the reviewer has finished; the work is going into the run's branch.
+        merging = bool(record and record.get("merging") and status in ACTIVE_STATUSES)
+        active = (progress.STAGE_ROLE.get(status) if status in ACTIVE_STATUSES and not merging
+                  else None)
         cost = round(sum(a["cost_usd"] or 0.0 for a in agents.values()), 6)
         return {
             "id": task_id,
@@ -268,6 +282,9 @@ class DashboardData:
             "worktree_path": (record or {}).get("worktree_path"),
             "findings": (record or {}).get("findings") or {},
             "checks": _mask_checks((record or {}).get("checks") or {}),
+            "merging": merging,
+            "merge": _mask_checks((record or {}).get("merge") or {}) or None,
+            "merge_text": describe_merge((record or {}).get("merge")),
             "agents": agents,
         }
 

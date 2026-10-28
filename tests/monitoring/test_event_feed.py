@@ -339,3 +339,39 @@ def test_failures_in_the_orchestrator_log_stand_out(tmp_path):
 def test_unknown_steps_still_show(tmp_path):
     (item,) = ef.orchestrator_items(write_log(tmp_path, [{"step": "something_new", "x": 1}]))
     assert item.title == "something new" and '"x": 1' in item.detail
+
+
+# --- M7.6: merges into the run's branch -----------------------------------------------------------
+
+
+def test_a_merge_is_one_item_that_waits_for_its_result(tmp_path):
+    path = write_log(tmp_path, [{"step": "merge_started", "commit": "c0ffee"}])
+    (item,) = ef.orchestrator_items(path)
+    assert item.title == "merging into the run's branch" and item.pending
+
+    path = write_log(tmp_path, [
+        {"step": "merge_started", "commit": "c0ffee"},
+        {"step": "merged", "branch": "agent/issue-7-r", "kind": "merge", "head": "1234567890abcdef",
+         "suite": {"seconds": 12.5, "exit_code": 0, "output_tail": "3 passed\n"}},
+    ])
+    (item,) = ef.orchestrator_items(path)
+    assert not item.pending and item.result["status"] == "ok"
+    assert item.result["summary"] == "real merge, full suite passed in 12.5s · 1234567890"
+    assert item.result["detail"] == "3 passed\n"
+
+
+def test_a_fast_forward_and_a_failed_merge_read_plainly(tmp_path):
+    path = write_log(tmp_path, [
+        {"step": "merge_started", "commit": "c0ffee"},
+        {"step": "merged", "branch": "b", "kind": "fast-forward", "head": "abcdef1234"},
+    ])
+    (item,) = ef.orchestrator_items(path)
+    assert item.result["summary"].startswith("fast-forward, no new suite run")
+
+    path = write_log(tmp_path, [
+        {"step": "merge_started", "commit": "c0ffee"},
+        {"step": "merge_failed", "kind": "conflict", "reason": "T3's work conflicts (a.py)."},
+    ])
+    (item,) = ef.orchestrator_items(path)
+    assert item.result["status"] == "error" and item.result["summary"] == "not merged (conflict)"
+    assert "conflicts (a.py)" in item.result["detail"]

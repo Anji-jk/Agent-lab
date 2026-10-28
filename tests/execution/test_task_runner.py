@@ -514,6 +514,55 @@ def test_a_task_is_refused_while_another_task_of_the_run_is_running(with_indepen
     assert seen == ["T1"]
 
 
+def make_safe(world, *task_ids):
+    """Mark tasks parallel-safe in the stored plan (the planner's flag, M7.3)."""
+    path = world["plans"] / RUN_ID / "plan.json"
+    data = json.loads(path.read_text())
+    for item in data["tasks"]:
+        item["parallel_safe"] = item["id"] in task_ids
+    path.write_text(json.dumps(data))
+
+
+def test_two_tasks_both_marked_parallel_safe_may_run_together(with_independent):
+    from orchestrator.records.task_registry import save_task
+    world = with_independent
+    make_safe(world, "T1", "T3")
+    save_task(world["runs"], RUN_ID, "T1", {"status": "building"})
+    ctx = prepare(world, "T3", lambda task_id, record: (True, "process 42 is running it"))
+    assert ctx.base_commit == world["base"]
+
+
+@pytest.mark.parametrize("safe", [("T1",), ("T3",), ()])
+def test_one_that_is_not_parallel_safe_still_waits_for_the_other(with_independent, safe):
+    from orchestrator.records.task_registry import save_task
+    world = with_independent
+    make_safe(world, *safe)
+    save_task(world["runs"], RUN_ID, "T1", {"status": "testing"})
+    with pytest.raises(tr.TaskNotReady, match="not both marked parallel-safe.*one at a time"):
+        prepare(world, "T3", lambda task_id, record: (True, "process 42 is running it"))
+
+
+def test_worktrees_and_commits_take_turns_at_git(world, agents, monkeypatch):
+    import contextlib
+    turns = []
+
+    @contextlib.contextmanager
+    def fake_lock(runs_dir, run_id):
+        turns.append("in")
+        yield
+        turns.append("out")
+
+    monkeypatch.setattr(tr, "git_lock", fake_lock)
+    record = run(world, agents)
+    assert record["status"] == "done"
+    assert turns == ["in", "out", "in", "out"]  # the worktree, then the commit
+
+
+def test_the_git_lock_is_a_folder_of_the_run(world):
+    with tr.git_lock(world["runs"], RUN_ID):
+        assert (world["runs"] / RUN_ID / tr.GIT_LOCK_FOLDER).is_dir()
+
+
 def test_a_task_whose_process_has_gone_does_not_block_the_next(with_independent):
     from orchestrator.records.task_registry import save_task
     world = with_independent

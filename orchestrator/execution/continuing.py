@@ -25,8 +25,10 @@ expired, so a resumed conversation would be re-read at full price.
 Like a retry, a continue is a new attempt with its own record and agent
 folders; the stopped attempt's files move to ``attempt-<n>/``. Unlike a retry,
 it keeps the worktree and branch, and it does not count as the task's one
-retry. It is refused when the run has moved on since the task started
-(another task finished), because its commit would then split the run's branch.
+retry. For a run with its own branch (M7.1) it makes no difference that other tasks
+finished since this one started: it is merged into the branch like any task. Only a run
+from before that, whose tasks form one chain, refuses a task the run has moved on from,
+because its commit would split the chain.
 """
 
 from __future__ import annotations
@@ -166,7 +168,8 @@ def continue_task(
         raise ExecutionRefused(problem)
     ctx = tr.prepare(run_id, task_id, plans_dir=plans_dir, runs_dir=runs_dir,
                      repo_path=repo_path, is_alive=alive)
-    if ctx.base_commit != record.get("base_commit"):
+    if (ctx.base_commit != record.get("base_commit")
+            and tr.integration_head(runs_dir, run_id, repo_path) is None):
         raise tr.TaskNotReady(
             f"{task_id} started from {str(record.get('base_commit'))[:12]}, but the run has moved "
             f"on to {ctx.base_commit[:12]} since (another task finished). Continuing it would "

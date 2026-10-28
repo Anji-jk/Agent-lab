@@ -186,3 +186,55 @@ def merge_task(
                            "at": utc_now()}]
         write_json_atomic(integration_path(runs_dir, run_id), data)
         return Merged(branch, kind, head, suite)
+
+
+# --- showing it (M7.6) -----------------------------------------------------------------------
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _took(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)):
+        return ""
+    return f" in {seconds:.0f} s" if seconds < 90 else f" in {round(seconds / 60)} min"
+
+
+def describe_merge(merge: Any) -> str | None:
+    """One line for a task record's ``merge``: how its work reached the run's branch, or not."""
+    if not isinstance(merge, dict):
+        return None
+    problem = merge.get("problem")
+    if problem == "conflict":
+        files = ", ".join(map(str, merge.get("files") or [])) or "files git named"
+        return f"not merged: conflicts with work merged before it ({files})"
+    if problem == "suite":
+        suite = _as_dict(merge.get("suite"))
+        what = "did not finish" if suite.get("timed_out") else "failed"
+        return f"not merged: the full suite {what} on the merged result{_took(suite.get('seconds'))}"
+    if problem:
+        return "not merged: the merge itself failed"
+    kind = merge.get("kind")
+    if kind == "fast-forward":
+        return "merged: fast-forward (nothing else was merged since it started, so no new suite run)"
+    if kind == "merge":
+        suite = _as_dict(merge.get("suite"))
+        return f"merged: real merge, the full suite passed on the merged result{_took(suite.get('seconds'))}"
+    if kind == "already":
+        return "merged: its commit was already on the run's branch"
+    return None
+
+
+KIND_WORDS = {"fast-forward": "fast-forward", "merge": "real merge", "already": "already there"}
+
+
+def branch_line(data: dict[str, Any] | None) -> str | None:
+    """``Run branch: <name> at <head> · merges: T1 fast-forward, T3 real merge``, or None."""
+    if not data:
+        return None
+    head = str(data.get("head") or data.get("base_commit") or "")[:12]
+    merges = [m for m in data.get("merges") or [] if isinstance(m, dict)]
+    told = ", ".join(f"{m.get('task')} {KIND_WORDS.get(str(m.get('kind')), m.get('kind'))}"
+                     for m in merges) or "none yet"
+    return f"Run branch: {data['branch']} at {head} · merges: {told}"

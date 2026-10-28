@@ -185,7 +185,9 @@
     const live = $("live");
     const fresh = S.lastOk ? ago((Date.now() - S.lastOk) / 1000) : "";
     live.className = "live" + (S.run && S.run.active ? " on" : "");
-    live.textContent = !S.run ? "" : S.run.active ? `live · updated ${fresh} ago` : "nothing running";
+    const running = S.run && S.run.running ? S.run.running.length : 0;
+    const many = running > 1 ? ` · ${running} tasks running` : "";
+    live.textContent = !S.run ? "" : S.run.active ? `live${many} · updated ${fresh} ago` : "nothing running";
   }
   function renderTasks() {
     const bar = $("tasks");
@@ -201,6 +203,7 @@
     for (const t of S.run.tasks) {
       let state = t.status;
       if (t.status === "not started" && t.waiting_for.length) state = `waits for ${t.waiting_for.join(", ")}`;
+      if (t.merging) state = "merging";
       bar.append(h("button", {
         class: "task", type: "button", "aria-pressed": String(S.sel.task === t.id), title: t.title,
         onclick: () => choose(t.id, t.active_role || S.sel.tab || "builder"),
@@ -311,6 +314,7 @@
     return check.exit_code === 0 ? `passed${took}` : `failed (exit ${check.exit_code})${took}`;
   }
 
+  const MERGE_KIND = { "fast-forward": "fast-forward", merge: "real merge (full suite run)", already: "already there" };
   function planParts() {
     const run = S.run;
     const p = run.planner;
@@ -322,6 +326,10 @@
       ["Tasks", run.tasks.map((t) => `${t.id} · ${t.complexity || "?"} · ${t.title}` +
         (t.depends_on.length ? ` (after ${t.depends_on.join(", ")})` : ""))],
       ["Base commit", run.base_commit ? run.base_commit.slice(0, 12) : null],
+      ["Run branch", run.integration ? `${run.integration.branch} at ${(run.integration.head || "").slice(0, 12)}` : null],
+      ["Merges", run.integration && run.integration.merges.length
+        ? run.integration.merges.map((m) => `${m.task} · ${MERGE_KIND[m.kind] || m.kind}`) : null],
+      ["Running now", run.running && run.running.length ? run.running.join(", ") : null],
     ])));
     return parts;
   }
@@ -359,6 +367,7 @@
       ["Branch", t.branch],
       ["Worktree", t.worktree_path],
       ["Commit", t.commit],
+      ["Merge", t.merging ? "merging into the run's branch now" : t.merge_text],
       ["Cost", t.cost_usd ? money(t.cost_usd) : null],
       ["Result", t.status === "done" && t.reasons.length ? t.reasons : null],
     ]));

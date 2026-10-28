@@ -452,7 +452,7 @@ def test_run_task_exit_codes_and_output(git_repo, tmp_path, monkeypatch, capsys,
             "--repo-path", str(git_repo), "--worktree-root", str(tmp_path / "wt")]
     assert cli.main(argv) == code
     out = capsys.readouterr().out
-    assert f"Task T1 of run run-ai-9: {status}" in out and "Nothing was pushed or merged." in out
+    assert f"Task T1 of run run-ai-9: {status}" in out and "Nothing was pushed, and your own branches were not changed." in out
     assert seen["verified"] == "Anji-jk/Agent-lab" and seen["worktree_root"] == tmp_path / "wt"
     assert seen["plans_dir"] == plans and seen["repo_path"] == git_repo
 

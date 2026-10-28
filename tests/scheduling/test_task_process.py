@@ -191,6 +191,45 @@ def test_the_cli_runs_each_task_as_its_own_process(world, monkeypatch):
                   "--no-board"])
     assert isinstance(seen["launch"], tp.ProcessLauncher)
     assert seen["launch"].worktree_root == seen["worktree_root"]
+    assert seen["max_parallel"] == 3  # together where the plan allows, with no flag
+
+
+def cli_run_plan(world, monkeypatch, *extra, **environ):
+    import orchestrator.cli.commands as cli
+    seen = {}
+
+    def fake_work(run_id, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "work_through_plan", fake_work)
+    monkeypatch.setattr(cli, "verify_remote_repository", lambda *a: None)
+    monkeypatch.delenv("AGENT_LAB_MAX_PARALLEL", raising=False)
+    for key, value in environ.items():
+        monkeypatch.setenv(key, value)
+    argv = ["run-plan", RUN_ID, "--plans-dir", str(world["plans"]), "--runs-dir", str(world["runs"]),
+            "--repo-path", str(world["repo"]), "--no-board", *extra]
+    try:
+        code = cli.main(argv)
+    except SystemExit:
+        code = 0
+    return seen, code
+
+
+def test_the_ceiling_comes_from_the_setting(world, monkeypatch):
+    seen, _ = cli_run_plan(world, monkeypatch, AGENT_LAB_MAX_PARALLEL="2")
+    assert seen["max_parallel"] == 2
+
+
+def test_one_at_a_time_is_one(world, monkeypatch):
+    seen, _ = cli_run_plan(world, monkeypatch, "--one-at-a-time", AGENT_LAB_MAX_PARALLEL="5")
+    assert seen["max_parallel"] == 1
+
+
+def test_a_bad_setting_is_refused_before_anything_starts(world, monkeypatch, capsys):
+    seen, code = cli_run_plan(world, monkeypatch, AGENT_LAB_MAX_PARALLEL="lots")
+    assert seen == {} and code == 4
+    assert "AGENT_LAB_MAX_PARALLEL" in capsys.readouterr().err
 
 
 def test_a_cancel_is_not_taken_for_a_crash(world, monkeypatch):

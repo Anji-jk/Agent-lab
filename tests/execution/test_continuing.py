@@ -110,12 +110,37 @@ def test_tasks_that_are_not_continued(world, agents, setup, expected):
     assert not (task_folder(world) / "attempt-1").exists()
 
 
-def test_a_task_is_not_continued_once_the_run_has_moved_on(with_independent, agents):
+def test_a_task_continued_after_the_run_moved_on_is_merged_into_the_run_branch(with_independent, agents):
+    """M7.3: with the run's branch, tasks side by side may finish in any order."""
     world = with_independent
-    stop_at(world, agents, "tester")  # T1 stopped; its process is gone
+    stopped = stop_at(world, agents, "tester")  # T1 stopped; its process is gone
     use_note(agents)
     other = run(world, agents, task_id="T3")  # T3 starts from the plan's base and finishes
     assert other["status"] == "done"
+    agents.behaviour = {"builder": agents.build_double, "tester": agents.test_double,
+                        "reviewer": agents.review_pass}  # back to T1's own agents
+    record = resume(world, agents)
+
+    assert record["status"] == "done", record["reasons"]
+    assert record["base_commit"] == stopped["base_commit"]  # the base its worktree was made from
+    assert record["merge"]["kind"] == "merge" and record["merge"]["suite"]["exit_code"] == 0
+    head = git(world["repo"], "rev-parse", record["merge"]["branch"])
+    for commit in (other["commit"], record["commit"]):
+        assert git(world["repo"], "merge-base", "--is-ancestor", commit, head) == ""
+
+
+def test_a_run_without_a_branch_still_refuses_a_task_the_run_has_moved_on_from(with_independent, agents):
+    """A run from before M7.1 has one chain of commits; a task from an older base would split it."""
+    from orchestrator.execution.integration import integration_path
+    world = with_independent
+    stop_at(world, agents, "tester")
+    use_note(agents)
+    run(world, agents, task_id="T3")
+    integration_path(world["runs"], RUN_ID).unlink()
+    git(world["repo"], "worktree", "remove", "--force", next(
+        line.split()[1] for line in git(world["repo"], "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ") and line.endswith(f"issue-7-{RUN_ID}")))
+    git(world["repo"], "branch", "-D", f"agent/issue-7-{RUN_ID}")
     with pytest.raises(tr.TaskNotReady, match="moved on"):
         resume(world, agents)
     assert not (task_folder(world) / "attempt-1").exists()

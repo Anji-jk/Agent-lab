@@ -65,6 +65,7 @@ class TaskProgress:
     blocked_by: tuple[str, ...] = ()      # the failed/cancelled tasks that block this one
     waiting_for: tuple[str, ...] = ()     # dependencies not done yet
     reason: str | None = None
+    merging: bool = False                 # running, and merging into the run's branch (M7.6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +142,8 @@ def compute_progress(
             else:  # pending, building, testing or reviewing: is anything still running it?
                 alive, why = is_alive(task_id, record)
                 result = TaskProgress(state="running" if alive else "interrupted",
-                                      stage=status, reason=None if alive else why, **common)
+                                      stage=status, reason=None if alive else why,
+                                      merging=alive and bool(record.get("merging")), **common)
         else:
             blockers: list[str] = []
             waiting: list[str] = []
@@ -239,9 +241,20 @@ def plan_progress(
 # --- showing it -------------------------------------------------------------------------------
 
 
+def _waits_for_a_place(task: TaskProgress, running: list[str],
+                       safe: Mapping[str, bool] | None) -> str:
+    """Why a ready task has not started while others run (M7.6)."""
+    names = ", ".join(running)
+    if safe is not None and any(not safe.get(t, False) for t in running):
+        return f"can start once {names} {'has' if len(running) == 1 else 'have'} ended ({names} runs by itself)"
+    if safe is not None and not safe.get(task.task_id, False):
+        return f"can start once {names} {'has' if len(running) == 1 else 'have'} ended (it runs by itself)"
+    return "can start when one of the running tasks ends"
+
+
 def _detail(task: TaskProgress, states: Mapping[str, str]) -> str:
     if task.state == "running":
-        return str(task.stage)
+        return f"{task.stage}, merging into the run's branch" if task.merging else str(task.stage)
     if task.state == "interrupted":
         return f"stopped while {task.stage}: {task.reason}"
     if task.state == "blocked":
@@ -253,13 +266,19 @@ def _detail(task: TaskProgress, states: Mapping[str, str]) -> str:
     return task.reason or ""
 
 
-def format_plan_progress(progress: PlanProgress, next_step: str | None = None) -> str:
+def format_plan_progress(progress: PlanProgress, next_step: str | None = None, *,
+                         merged: Mapping[str, str] | None = None,
+                         safe: Mapping[str, bool] | None = None) -> str:
     """The plan line and one line per task.
 
     ``next_step`` is what ``run-plan`` would do next ("continue T2", "retry T1",
     "start T3"), or "" when it would stop; ``status`` passes it, because the first
     ready task is not always next: an interrupted task is continued first and a
     failed one retried first. Without it, the first ready task is named.
+
+    ``merged`` (task -> how it reached the run's branch) is shown on done tasks, and
+    ``safe`` (the plan's parallel-safe marks) says why a ready task waits while others
+    run (M7.6).
     """
     done = len(progress.with_state("done"))
     head = f"Plan: {done} of {len(progress.tasks)} done"
@@ -278,7 +297,12 @@ def format_plan_progress(progress: PlanProgress, next_step: str | None = None) -
     states = {t.task_id: t.state for t in progress.tasks}
     lines = [head]
     for task in progress.tasks:
-        lines.append(f"  {task.task_id:<4} {task.state:<12} {_detail(task, states)}".rstrip())
+        detail = _detail(task, states)
+        if task.state == "ready" and running:
+            detail = _waits_for_a_place(task, running, safe)
+        elif task.state == "done" and merged and merged.get(task.task_id):
+            detail = merged[task.task_id]
+        lines.append(f"  {task.task_id:<4} {task.state:<12} {detail}".rstrip())
     if progress.unknown_records:
         lines.append(f"  Warning: records for tasks not in the plan: {', '.join(progress.unknown_records)}")
     return "\n".join(lines)

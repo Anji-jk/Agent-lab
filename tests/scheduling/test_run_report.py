@@ -41,7 +41,11 @@ def test_a_complete_run_names_its_branch_and_the_last_commit(world, agents):
     shown = rr.format_report(result)
     assert f"Branch:  {result.branch} at {records['T2']['commit'][:12]}" in shown
     assert f"git log --oneline {world['base'][:12]}..{result.branch}" in shown
-    assert "Nothing was pushed or merged" in shown
+    assert "Nothing was pushed, and your own branches were not changed" in shown
+    # M7.6: each merge is shown; one at a time, nothing ran together.
+    assert "Merges:  T1 fast-forward, T2 fast-forward" in shown
+    assert shown.count("merged: fast-forward") == 2
+    assert "Together:" not in shown and result.together == []
 
 
 def test_the_cost_is_every_agent_of_every_task(world, agents):

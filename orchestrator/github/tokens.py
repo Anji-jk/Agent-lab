@@ -1,7 +1,8 @@
 """The GitHub tokens, from the environment or from the project's .env file (M5.1).
 
-Only two names are taken from ``.env``: ``GITHUB_TOKEN`` (the Issue work) and
-``AGENT_LAB_PROJECT_TOKEN`` (the board). Everything else in the file is left
+Only three names are taken from ``.env``: ``GITHUB_TOKEN`` (the Issue work),
+``AGENT_LAB_PROJECT_TOKEN`` (the board) and ``AGENT_LAB_MAX_PARALLEL`` (a plain
+number, how many tasks run-plan runs together, M7.3). Everything else in the file is left
 alone on purpose: ``ANTHROPIC_API_KEY`` is on the agents' allowlist
 (``scripts/agent_env.py``), so loading every name would pass more to the agents
 than intended. Neither GitHub token is on that list, so loading them into this
@@ -22,6 +23,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 
 TOKEN_NAMES = ("GITHUB_TOKEN", "AGENT_LAB_PROJECT_TOKEN")
+SETTING_NAMES = ("AGENT_LAB_MAX_PARALLEL",)  # not secret; read from .env like the tokens
 ENV_FILE_NAME = ".env"
 ENV_FILE_VARIABLE = "AGENT_LAB_ENV_FILE"  # another file instead; the tests point it at none
 MAX_ENV_FILE_BYTES = 64_000
@@ -37,7 +39,7 @@ def _value(raw: str) -> str:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """The token names found in a .env file: KEY=VALUE lines, # comments, optional 'export '."""
+    """The token and setting names found in a .env file: KEY=VALUE lines, # comments, optional 'export '."""
     try:
         if path.stat().st_size > MAX_ENV_FILE_BYTES:
             return {}
@@ -53,7 +55,7 @@ def read_env_file(path: Path) -> dict[str, str]:
         key = key.strip()
         if key.startswith("export "):
             key = key[len("export "):].strip()
-        if key in TOKEN_NAMES:
+        if key in TOKEN_NAMES + SETTING_NAMES:
             value = _value(raw)
             if value:
                 found[key] = value

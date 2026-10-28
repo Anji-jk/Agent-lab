@@ -23,11 +23,25 @@ Spent means what the run's task agents have cost, across every attempt,
 read from the agents' progress files and the task records. The planner is
 not counted: it ran before the budget could be set. No budget file means no
 run limit, as before M4.6.
+
+Tasks side by side (M7.4). Agents already running in other tasks have not spent
+their whole cap yet, but they may. So the rule counts them too: what is spent,
+plus what each running agent of another task may still spend (its cap minus what
+it has cost so far, so nothing is counted twice), plus the new agent's cap, must
+fit. To keep two tasks from both passing at the same instant, the check and the
+agent's reservation happen together under a lock, and the reservation is written
+into the task's record (``reservation``) until the agent ends. A reservation of a
+task whose process has gone is ignored: nothing is running on it.
+
+An agent refused because of other tasks' reservations is refused only for now:
+those caps are freed as their agents end. The task stops like any budget stop,
+and ``run-plan`` again goes on from the stage it reached.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +49,17 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.roles import ROLE_NAMES
 from orchestrator.monitoring.progress import agent_run_id, attempt_of, progress_path, read_progress
-from orchestrator.records.run_registry import run_directory, utc_now, write_json_atomic
-from orchestrator.records.task_registry import list_tasks
+from orchestrator.records.run_registry import (
+    RunRegistryError, locked, run_directory, utc_now, write_json_atomic,
+)
+from orchestrator.records.task_registry import list_tasks, update_task
 
 BUDGET_FILE_NAME = "budget.json"
 MAX_BUDGET_USD = 1000.0
+LOCK_FOLDER = "budget-lock"
+LOCK_SECONDS = 60
+RESERVATION_FIELD = "reservation"
+IsAlive = Callable[[str, dict[str, Any]], "tuple[bool, str]"]
 
 
 class BudgetExhausted(ExecutionRefused):
@@ -131,18 +151,79 @@ def run_spent(runs_dir: Path, run_id: str,
                      for task_id, record in list_tasks(Path(runs_dir), run_id).items()), 6)
 
 
+def reserved_elsewhere(runs_dir: Path, run_id: str, task_id: str, is_alive: IsAlive,
+                       runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT) -> list[tuple[str, str, float]]:
+    """(task, role, USD still to spend) for each agent running in another task of the run."""
+    found = []
+    for other, record in list_tasks(Path(runs_dir), run_id).items():
+        reservation = record.get(RESERVATION_FIELD)
+        if other == task_id or not isinstance(reservation, dict):
+            continue
+        cap, role = _cost(reservation.get("cap_usd")), reservation.get("role")
+        if cap is None or not isinstance(role, str) or not is_alive(other, record)[0]:
+            continue
+        attempt = reservation.get("attempt")
+        spent = _agent_cost(run_id, other, role, attempt if isinstance(attempt, int) else attempt_of(record),
+                            Path(runner_script)) or 0.0
+        if cap - spent > 1e-9:
+            found.append((other, role, round(cap - spent, 6)))
+    return found
+
+
 def budget_problem(runs_dir: Path, run_id: str, role: str, cap_usd: float,
-                   runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT) -> str | None:
-    """Why the next agent may not start, or None when it may (or there is no budget)."""
+                   runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
+                   task_id: str | None = None, is_alive: IsAlive | None = None) -> str | None:
+    """Why the next agent may not start, or None when it may (or there is no budget).
+
+    With ``task_id`` and ``is_alive``, what agents running in the run's other tasks may
+    still spend is counted too (M7.4).
+    """
     limit = load_budget(runs_dir, run_id)
     if limit is None:
         return None
     spent = run_spent(runs_dir, run_id, runner_script)
-    if spent + cap_usd <= limit + 1e-9:
+    running = (reserved_elsewhere(runs_dir, run_id, task_id, is_alive, runner_script)
+               if task_id is not None and is_alive is not None else [])
+    kept = sum(amount for _, _, amount in running)
+    if spent + kept + cap_usd <= limit + 1e-9:
         return None
-    return (f"Run budget: ${spent:.4f} of ${limit:.2f} is spent, and the {role} may spend up "
-            f"to ${cap_usd:.2f}, which could go over it, so it was not started. Raise the "
-            f"budget (python -m orchestrator budget {run_id} --set <amount>) to go on.")
+    if not running:
+        return (f"Run budget: ${spent:.4f} of ${limit:.2f} is spent, and the {role} may spend up "
+                f"to ${cap_usd:.2f}, which could go over it, so it was not started. Raise the "
+                f"budget (python -m orchestrator budget {run_id} --set <amount>) to go on.")
+    who = ", ".join(f"{other}'s {name}" for other, name, _ in running)
+    return (f"Run budget: ${spent:.4f} of ${limit:.2f} is spent, ${kept:.4f} more may still be "
+            f"spent by agents running in other tasks ({who}), and the {role} may spend up to "
+            f"${cap_usd:.2f}, which could go over it, so it was not started. Their unused caps "
+            "are freed as they finish: run run-plan again then, or raise the budget "
+            f"(python -m orchestrator budget {run_id} --set <amount>) to go on.")
+
+
+def reserve_agent(runs_dir: Path, run_id: str, task_id: str, role: str, attempt: int,
+                  cap_usd: float, is_alive: IsAlive,
+                  runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT) -> str | None:
+    """Check the budget and, if the agent fits, reserve its cap; a reason when it does not.
+
+    The check and the reservation are one step under a lock, so two tasks starting an
+    agent at the same moment cannot both count on the same money. With no budget there is
+    nothing to reserve. ``release_agent`` ends the reservation when the agent has ended.
+    """
+    if load_budget(runs_dir, run_id) is None:
+        return None
+    with locked(run_directory(Path(runs_dir), run_id) / LOCK_FOLDER, timeout=LOCK_SECONDS):
+        problem = budget_problem(runs_dir, run_id, role, cap_usd, runner_script, task_id, is_alive)
+        if problem is None:
+            update_task(Path(runs_dir), run_id, task_id, {RESERVATION_FIELD: {
+                "role": role, "cap_usd": cap_usd, "attempt": attempt, "at": utc_now()}})
+        return problem
+
+
+def release_agent(runs_dir: Path, run_id: str, task_id: str) -> None:
+    """End a task's reservation (the agent ended, or never started)."""
+    try:
+        update_task(Path(runs_dir), run_id, task_id, {RESERVATION_FIELD: None})
+    except RunRegistryError:  # the record is gone: nothing is left to release
+        return
 
 
 def format_budget(runs_dir: Path, run_id: str,

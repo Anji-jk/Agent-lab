@@ -1,4 +1,4 @@
-"""Work through a stored plan, one task at a time (M4.7).
+"""Work through a stored plan: one task at a time, or several side by side (M4.7, M7.3).
 
 ``run-plan <run>`` does what a person would otherwise do by hand: look at where
 the plan stands, start the next task, and repeat. It keeps no memory of its
@@ -6,24 +6,37 @@ own. Before every step it reads the plan's progress from disk (``plan_progress``
 so stopping it at any point (Ctrl+C, a closed window, a reboot) loses nothing,
 and running it again goes on from where the records say the plan is.
 
-What it does at each step, in this order:
+What it does when it looks, in this order:
 
 1. Every task done: the plan is complete.
-2. A task is running in another process: stop. A run's tasks share one branch,
-   so they run one at a time.
+2. A task is running that this run-plan did not start (another process): start
+   nothing, and stop when its own tasks are finished.
 3. A task a person must look at (``needs_review``, ``cancelled``, or ``failed``
-   with no retry left): stop the whole plan. Independent tasks are not run
-   around it: a plan that stops at the first problem is easy to reason about,
-   and its branch never holds work that skipped a step.
+   with no retry left): stop the whole plan. Independent tasks are not started
+   around it: a plan that stops at the first problem is easy to reason about.
 4. An interrupted task (its process went away part-way), or one stopped by the
    run budget or (after its reset) by Claude's usage limit: continue it in its own worktree (M4.5), before anything new,
    because its worktree already holds work that was paid for.
 5. A failed task with its retry left: retry it once, with the findings (M4.4).
-6. Otherwise, the next ready task in plan order: run it.
+6. Otherwise, the ready tasks in plan order: run them.
 
-A task stopped by the run budget stops the whole plan at once: every later
-agent would meet the same limit. Raise the budget and run ``run-plan`` again;
-the stopped task continues from the stage it reached.
+Side by side (M7.3): with room for more than one task (``max_parallel``), run-plan
+starts every task it may start together. Two tasks run together only when the plan
+marks both parallel-safe (the planner allows that only for tasks that are not
+ordered and share no file); a task that is not parallel-safe runs alone, and the
+tasks after it in plan order wait for it. Tasks are taken in plan order, so a
+sequential task is never passed over. When one task ends, run-plan looks again: the
+next ready task starts, or a task that depended on it is now ready. The tasks'
+work is merged one at a time into the run's branch (M7.1), and git work that could
+collide (making a worktree, committing) takes turns.
+
+When a task stops the plan (a person must look, the run budget, Claude's usage
+limit, a process that died) no new task starts; the tasks already running finish
+first, and then the plan stops with the first reason.
+
+A task stopped by the run budget stops the whole plan: every later agent would
+meet the same limit. Raise the budget and run ``run-plan`` again; the stopped task
+continues from the stage it reached.
 
 So does a task stopped by Claude's usage limit (M5.5: the five-hour or weekly
 limit refused an agent). Every later agent would be refused too. Run
@@ -34,8 +47,8 @@ Only one ``run-plan`` may work on a run at a time. It holds
 ``runs/<run>/run-plan.json`` (its process ID) while it works; a lock left by a
 process that has gone is taken over, one held by a live ``run-plan`` refuses.
 
-Nothing is pushed or merged: each finished task is a local commit, as with
-``run-task``.
+Nothing is pushed or merged outside the run's own branch: each finished task is a
+local commit, as with ``run-task``.
 """
 
 from __future__ import annotations
@@ -43,7 +56,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,7 +72,9 @@ from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.run_registry import run_directory, utc_now
 from orchestrator.records.run_registry import RunRegistryError
 from orchestrator.records.task_registry import FINAL_STATUSES, list_tasks, load_task
-from orchestrator.scheduling.task_process import Ended, InProcessLauncher, Launcher, wait
+from orchestrator.scheduling.task_process import (
+    POLL_SECONDS, Ended, Handle, InProcessLauncher, Launcher,
+)
 from orchestrator.scheduling.plan_progress import (
     CommandLine,
     PlanProgress,
@@ -71,6 +86,9 @@ LOCK_FILE_NAME = "run-plan.json"
 SETTLE_SECONDS = 15.0      # how long a task's final status may take to appear (cancel)
 SETTLE_POLL_SECONDS = 0.5
 ACTIONS = ("run", "retry", "continue")
+DEFAULT_MAX_PARALLEL = 3
+MAX_PARALLEL_LIMIT = 8       # more tasks at once would mostly wait on each other's merges
+MAX_PARALLEL_VARIABLE = "AGENT_LAB_MAX_PARALLEL"
 
 
 class PlanAlreadyRunning(ExecutionRefused):
@@ -163,15 +181,18 @@ def _stop_reason(run_id: str, task_id: str, state: str, record: dict[str, Any],
             f"python -m orchestrator show-task {run_id} {task_id}.")
 
 
-def next_action(progress: PlanProgress,
-                records: dict[str, dict[str, Any]]) -> tuple[str, str] | str | None:
-    """(action, task) to do next, a reason to stop, or None when the plan is complete."""
-    if progress.state == "complete":
-        return None
-    for task in progress.with_state("running"):
-        return (f"{task.task_id} is running in another process (at {task.stage}). A run's tasks "
-                "run one at a time; wait for it to finish, or cancel it.")
+def _running_elsewhere(task: Any) -> str:
+    return (f"{task.task_id} is running in another process (at {task.stage}). A task that "
+            "run-plan did not start is running; wait for it to finish, or cancel it.")
 
+
+def _choices(progress: PlanProgress,
+             records: dict[str, dict[str, Any]]) -> tuple[list[tuple[str, str]], str | None]:
+    """What could be started, in order, or the reason a person must look first.
+
+    Continues and retries come first (their worktrees hold paid-for work), then the
+    ready tasks in plan order.
+    """
     can_go_on: list[tuple[str, str]] = []
     for task in progress.tasks:
         record = records.get(task.task_id) or {}
@@ -182,20 +203,90 @@ def next_action(progress: PlanProgress,
         elif task.state == "needs_review" and record.get("limit_stop"):
             resets = limit_not_reset(record)
             if resets:
-                return (f"{task.task_id} was stopped by Claude's usage limit, which resets at "
-                        f"{when_text(resets)}. Run run-plan again after that; {task.task_id} continues "
-                        "from where it stopped.")
+                return [], (f"{task.task_id} was stopped by Claude's usage limit, which resets at "
+                            f"{when_text(resets)}. Run run-plan again after that; {task.task_id} continues "
+                            "from where it stopped.")
             can_go_on.append(("continue", task.task_id))
         elif task.state == "failed" and retry_problem(record) is None:
             can_go_on.append(("retry", task.task_id))
         elif task.state in ("failed", "needs_review", "cancelled"):
             # A person must look; nothing else runs until they have.
-            return _stop_reason(progress.run_id, task.task_id, task.state, record, task.reason)
-    if can_go_on:
-        return can_go_on[0]
-    if progress.next_task is not None:
-        return ("run", progress.next_task)
+            return [], _stop_reason(progress.run_id, task.task_id, task.state, record, task.reason)
+    return can_go_on + [("run", task_id) for task_id in progress.ready], None
+
+
+def next_action(progress: PlanProgress,
+                records: dict[str, dict[str, Any]]) -> tuple[str, str] | str | None:
+    """(action, task) to do next, a reason to stop, or None when the plan is complete."""
+    if progress.state == "complete":
+        return None
+    for task in progress.with_state("running"):
+        return _running_elsewhere(task)
+    choices, stop = _choices(progress, records)
+    if stop:
+        return stop
+    if choices:
+        return choices[0]
     return "No task can start, and none is running."  # not expected: waiting needs a cause
+
+
+@dataclass(frozen=True, slots=True)
+class Launches:
+    """What run-plan does now: tasks to start, or why it starts nothing more."""
+    start: tuple[tuple[str, str], ...] = ()
+    stop: str | None = None
+    complete: bool = False
+
+
+def next_actions(progress: PlanProgress, records: dict[str, dict[str, Any]], active: set[str],
+                 safe: Mapping[str, bool], slots: int) -> Launches:
+    """The steps to start now, given the tasks (``active``) this run-plan already runs.
+
+    ``safe`` is each task's parallel-safe flag from the plan and ``slots`` the most tasks
+    that may run together. Tasks are taken in the order of ``_choices``; at the first one
+    that cannot start now, the rest wait, so a task that has to run alone is never
+    passed over by later ones.
+    """
+    if progress.state == "complete":
+        return Launches(complete=True)
+    for task in progress.with_state("running"):
+        if task.task_id not in active:
+            return Launches(stop=_running_elsewhere(task))
+    choices, stop = _choices(progress, records)
+    if stop:
+        return Launches(stop=stop)
+    alone = any(not safe.get(task_id, False) for task_id in active)  # a task running by itself
+    start: list[tuple[str, str]] = []
+    for action, task_id in choices:
+        if task_id in active:  # started by this run-plan; its record may not exist yet
+            continue
+        if alone or len(active) + len(start) >= slots:
+            break
+        if not safe.get(task_id, False):
+            if not active and not start:
+                start.append((action, task_id))  # it runs by itself
+            break
+        start.append((action, task_id))
+    if not start and not active:
+        return Launches(stop="No task can start, and none is running.")
+    return Launches(tuple(start))
+
+
+def max_parallel_setting(one_at_a_time: bool = False,
+                         environ: Mapping[str, str] | None = None) -> int:
+    """How many tasks run-plan runs together: 1 with --one-at-a-time, else the setting or 3."""
+    if one_at_a_time:
+        return 1
+    environ = os.environ if environ is None else environ
+    raw = (environ.get(MAX_PARALLEL_VARIABLE) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_PARALLEL
+    if not raw.isdigit() or not 1 <= int(raw) <= MAX_PARALLEL_LIMIT:
+        raise ExecutionRefused(
+            f"{MAX_PARALLEL_VARIABLE} is {raw!r}; it must be a whole number from 1 to "
+            f"{MAX_PARALLEL_LIMIT} (how many tasks run together). Fix it in .env or the window, "
+            "or use --one-at-a-time.")
+    return int(raw)
 
 
 def describe_next(decision: tuple[str, str] | str | None) -> str:
@@ -213,6 +304,25 @@ def describe_next(decision: tuple[str, str] | str | None) -> str:
 OnStep = Callable[[str, str, "Step | None"], None]  # (action, task, finished step or None)
 
 
+@dataclass
+class _Running:
+    """A task this run-plan has started and is waiting for."""
+    handle: Handle
+    action: str
+    before: tuple[Any, ...] | None   # what the record looked like before, to see it change
+
+
+def _wait_for_any(running: dict[str, _Running],
+                  poll_seconds: float = POLL_SECONDS) -> list[tuple[str, Ended]]:
+    """Wait until at least one running task has ended; return those that have."""
+    while True:
+        ended = [(task_id, done) for task_id, task in running.items()
+                 if (done := task.handle.poll()) is not None]
+        if ended:
+            return ended
+        time.sleep(poll_seconds)
+
+
 def run_plan(
     run_id: str,
     *,
@@ -227,11 +337,14 @@ def run_plan(
     get_command_line: CommandLine | None = None,
     on_step: OnStep | None = None,
     launch: Launcher | None = None,
+    max_parallel: int = 1,
 ) -> PlanRun:
-    """Run the plan's tasks one at a time until it is complete or something stops it.
+    """Run the plan's tasks until it is complete or something stops it.
 
     ``launch`` starts each step: the CLI passes a ``ProcessLauncher`` (M7.2), so each
     task runs as its own process; without one the step runs here, in this process.
+    ``max_parallel`` is how many tasks may run together (M7.3): 1 runs them one at a
+    time, as before; the CLI passes 3 unless told otherwise.
     """
     plan = load_task_plan(plans_dir, run_id)
     lock = acquire_lock(runs_dir, run_id, get_command_line)
@@ -241,61 +354,73 @@ def run_plan(
                   test_command=test_command, env=env)
     # Each task can be run, continued and retried; more steps than that is a bug, not a plan.
     limit = 4 * len(plan["tasks"]) + 2
+    safe = {task["id"]: bool(task.get("parallel_safe")) for task in plan["tasks"]}
     launch = launch or InProcessLauncher(
         lambda action, task_id: _do(action, run_id, task_id, worktree_root, get_command_line,
                                     common))
+    running: dict[str, _Running] = {}
+    halt: str | None = None      # why nothing more is started; the plan stops once nothing runs
+    refused = False
+
+    def progress_now() -> PlanProgress:
+        return plan_progress(plan, runs_dir, run_id, get_command_line=get_command_line,
+                             runner_script=Path(runner_script))
+
     try:
         while True:
-            progress = plan_progress(plan, runs_dir, run_id, get_command_line=get_command_line,
-                                     runner_script=Path(runner_script))
-            result.progress = progress
-            last = result.steps[-1] if result.steps else None
-            if last is not None and last.limit_stop is not None:
-                when = f", which resets at {when_text(last.limit_stop)}" if last.limit_stop else ""
-                result.stopped = (f"{last.task_id} was stopped by Claude's usage limit{when}. Every "
-                                  "later agent would be refused too, so the plan stops here. Run "
-                                  f"run-plan again after the reset: {last.task_id} continues from "
-                                  "where it stopped.")
-                return result
-            if last is not None and last.budget_stop:
-                result.stopped = (f"{last.task_id} was stopped by the run budget. {last.reason} "
-                                  f"Then run-plan again: {last.task_id} continues from where it stopped.")
-                return result
-            decision = next_action(progress, list_tasks(runs_dir, run_id))
-            if decision is None:
-                return result
-            if isinstance(decision, str):
-                result.stopped = decision
-                return result
-            if len(result.steps) >= limit:
-                result.stopped = f"Stopped after {limit} steps; this should not happen, please report it."
+            result.progress = progress_now()
+            if halt is None:
+                decision = next_actions(result.progress, list_tasks(runs_dir, run_id),
+                                        set(running), safe, max_parallel)
+                if decision.complete:
+                    return result
+                halt = decision.stop
+                for action, task_id in decision.start:
+                    if len(result.steps) + len(running) >= limit:
+                        halt = (f"Stopped after {limit} steps; this should not happen, "
+                                "please report it.")
+                        break
+                    if on_step:
+                        on_step(action, task_id, None)
+                    before = _seen(runs_dir, run_id, task_id)
+                    running[task_id] = _Running(launch(action, task_id), action, before)
+            if not running:
+                result.stopped = halt or "No task can start, and none is running."
+                result.refused = refused
                 return result
 
-            action, task_id = decision
-            if on_step:
-                on_step(action, task_id, None)
-            before = _seen(runs_dir, run_id, task_id)
-            ended = wait(launch(action, task_id))
-            record = _settled(runs_dir, run_id, task_id, _record(runs_dir, run_id, task_id))
-            problem = _not_finished(action, task_id, ended, before, record)
-            if problem is not None:
-                result.stopped = problem
-                result.refused = ended.refused
-                result.progress = plan_progress(plan, runs_dir, run_id,
-                                                get_command_line=get_command_line,
-                                                runner_script=Path(runner_script))
-                return result
-            assert record is not None
-            reasons = record.get("reasons") or []
-            step = Step(task_id, action, record["status"], int(record.get("attempt") or 1),
-                        record.get("cost_usd"),
-                        _budget_reason(reasons) if record.get("budget_stop") else
-                        (str(reasons[0]) if reasons else None),
-                        bool(record.get("budget_stop")),
-                        _limit_resets(record))
-            result.steps.append(step)
-            if on_step:
-                on_step(action, task_id, step)
+            for task_id, ended in _wait_for_any(running):
+                task = running.pop(task_id)
+                record = _settled(runs_dir, run_id, task_id, _record(runs_dir, run_id, task_id))
+                problem = _not_finished(task.action, task_id, ended, task.before, record)
+                if problem is not None:
+                    if halt is None:  # the first reason is the one given
+                        halt, refused = problem, ended.refused
+                    continue
+                assert record is not None
+                reasons = record.get("reasons") or []
+                step = Step(task_id, task.action, record["status"], int(record.get("attempt") or 1),
+                            record.get("cost_usd"),
+                            _budget_reason(reasons) if record.get("budget_stop") else
+                            (str(reasons[0]) if reasons else None),
+                            bool(record.get("budget_stop")),
+                            _limit_resets(record))
+                result.steps.append(step)
+                if on_step:
+                    on_step(task.action, task_id, step)
+                if halt is None and step.limit_stop is not None:
+                    when = f", which resets at {when_text(step.limit_stop)}" if step.limit_stop else ""
+                    halt = (f"{task_id} was stopped by Claude's usage limit{when}. Every "
+                            "later agent would be refused too, so the plan stops here. Run "
+                            f"run-plan again after the reset: {task_id} continues from "
+                            "where it stopped.")
+                elif halt is None and step.budget_stop:
+                    halt = (f"{task_id} was stopped by the run budget. {step.reason} "
+                            f"Then run-plan again: {task_id} continues from where it stopped.")
+    except BaseException:
+        for task in running.values():  # Ctrl+C or a bug: no process is left running
+            task.handle.stop()
+        raise
     finally:
         release_lock(lock)
 

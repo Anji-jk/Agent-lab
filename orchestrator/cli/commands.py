@@ -27,6 +27,7 @@ from orchestrator.execution.background import start_task_in_background
 from orchestrator.execution.budget import format_budget, remove_budget, set_budget
 from orchestrator.execution.cancel import cancel_task
 from orchestrator.execution.continuing import continue_task
+from orchestrator.execution.integration import branch_line, describe_merge, load_integration
 from orchestrator.execution.retry import retry_task
 from orchestrator.legacy.executor import execute_plan
 from orchestrator.github.board import board_path, connect_board, format_connection, save_board
@@ -51,7 +52,7 @@ from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.scheduling.left_behind import format_left_behind, is_stopped, left_behind
 from orchestrator.scheduling.task_process import ProcessLauncher
 from orchestrator.scheduling.run_plan import (
-    describe_next, format_step, next_action, run_plan as work_through_plan,
+    describe_next, format_step, max_parallel_setting, next_action, run_plan as work_through_plan,
 )
 from orchestrator.scheduling.run_report import build_report, format_report, save_report
 from orchestrator.scheduling.plan_progress import (
@@ -225,8 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_plan_parser = subparsers.add_parser(
         "run-plan",
-        help="Run the plan's tasks one at a time until it is complete or a task needs a "
-             "person; commits locally, never pushes.",
+        help="Run the plan's tasks (together where the plan allows) until it is complete or a "
+             "task needs a person; commits locally, never pushes.",
     )
     run_plan_parser.add_argument("run_id", help="Run ID the plan was stored under.")
     run_plan_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -242,6 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_plan_parser.add_argument(
         "--no-board", action="store_true",
         help="Leave the GitHub board alone for this run, even when one is connected.",
+    )
+    run_plan_parser.add_argument(
+        "--one-at-a-time", action="store_true",
+        help="Run one task at a time, even where the plan allows several together "
+             "(otherwise up to AGENT_LAB_MAX_PARALLEL, 3 if unset).",
     )
 
     board_parser = subparsers.add_parser(
@@ -434,7 +440,7 @@ def run_run_task(args: argparse.Namespace) -> int:
                             runs_dir=args.runs_dir, repo_path=args.repo_path,
                             worktree_root=args.worktree_root or default_worktree_root())
         display_task(record)
-        print("\nNothing was pushed or merged.")
+        print("\nNothing was pushed, and your own branches were not changed.")
         return {"done": EXIT_OK, "failed": EXIT_TASK_FAILED}.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
     if args.continue_task:
         print(f"Continuing {args.task_id} of run {args.run_id} from where it stopped; "
@@ -443,7 +449,7 @@ def run_run_task(args: argparse.Namespace) -> int:
                                runs_dir=args.runs_dir, repo_path=args.repo_path,
                                worktree_root=args.worktree_root or default_worktree_root())
         display_task(record)
-        print("\nNothing was pushed or merged.")
+        print("\nNothing was pushed, and your own branches were not changed.")
         return {"done": EXIT_OK, "failed": EXIT_TASK_FAILED}.get(record["status"], EXIT_TASK_NEEDS_REVIEW)
     print(
         f"Running {args.task_id} of run {args.run_id}: builder, tester and reviewer "
@@ -456,7 +462,7 @@ def run_run_task(args: argparse.Namespace) -> int:
         worktree_root=args.worktree_root or default_worktree_root(),
     )
     display_task(record)
-    print("\nNothing was pushed or merged.")
+    print("\nNothing was pushed, and your own branches were not changed.")
     return {
         "done": EXIT_OK,
         "failed": EXIT_TASK_FAILED,
@@ -466,7 +472,10 @@ def run_run_task(args: argparse.Namespace) -> int:
 def run_run_plan(args: argparse.Namespace) -> int:
     plan = load_task_plan(args.plans_dir, args.run_id)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
-    print(f"Working through the plan of run {args.run_id}, one task at a time. Agents call "
+    together = max_parallel_setting(args.one_at_a_time)
+    how = ("one task at a time" if together == 1 else
+           f"up to {together} tasks at a time where the plan allows it (--one-at-a-time for one)")
+    print(f"Working through the plan of run {args.run_id}, {how}. Agents call "
           "Claude, so this may take a long while. Ctrl+C stops it; run-plan again goes on "
           "from where it stopped.", file=sys.stderr)
 
@@ -485,11 +494,12 @@ def run_run_plan(args: argparse.Namespace) -> int:
         result = work_through_plan(
             args.run_id, plans_dir=args.plans_dir, runs_dir=args.runs_dir,
             repo_path=args.repo_path, worktree_root=worktree_root, on_step=show, launch=launch,
+            max_parallel=together,
         )
     except KeyboardInterrupt:
-        print(f"\nStopped by Ctrl+C. The task that was running is interrupted; run "
-              f"python -m orchestrator run-plan {args.run_id} again and it continues from "
-              "where it stopped. Nothing was pushed or merged.", file=sys.stderr)
+        print(f"\nStopped by Ctrl+C. The tasks that were running are interrupted; run "
+              f"python -m orchestrator run-plan {args.run_id} again and each continues from "
+              "where it stopped. Nothing was pushed.", file=sys.stderr)
         return EXIT_INTERRUPTED
     # Not after Ctrl+C: this process still owns the stopped task until it exits, so it
     # would look running. The next run-plan, or board sync, moves its card.
@@ -499,10 +509,10 @@ def run_run_plan(args: argparse.Namespace) -> int:
     print("\n" + text)
     print(f"Saved this report: {save_report(args.runs_dir, args.run_id, text)}")
     if result.complete:
-        print("\nThe plan is complete. Nothing was pushed or merged.")
+        print("\nThe plan is complete. Nothing was pushed, and your own branches were not changed.")
         return EXIT_OK
     print(f"\nStopped: {result.stopped}")
-    print("Nothing was pushed or merged.")
+    print("Nothing was pushed, and your own branches were not changed.")
     if result.refused:
         return EXIT_REFUSED
     if result.steps and result.steps[-1].status == "failed":
@@ -523,7 +533,7 @@ def run_task_in_background(args: argparse.Namespace) -> int:
     print(f"Log:    {started.log}")
     print(f"Watch:  python -m orchestrator status {args.run_id} --watch 2")
     print(f"        python -m orchestrator dashboard {args.run_id}")
-    print("It keeps running if you close this window. Nothing will be pushed or merged.")
+    print("It keeps running if you close this window. Nothing will be pushed.")
     return EXIT_OK
 
 
@@ -669,10 +679,18 @@ def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
         print(f"\nWarning: no heartbeat from {', '.join(stale)}. Its process may have stopped.")
     if not has_plan:
         return any(task.active_role for task in tasks)
-    progress = plan_progress(load_task_plan(plans_dir, run_id), runs_dir, run_id)
+    plan = load_task_plan(plans_dir, run_id)
+    progress = plan_progress(plan, runs_dir, run_id)
+    records = list_tasks(runs_dir, run_id)
     # "next" as run-plan would do it: an interrupted task first, a failed one retried first.
-    upcoming = describe_next(next_action(progress, list_tasks(runs_dir, run_id)))
-    print("\n" + format_plan_progress(progress, next_step=upcoming))
+    upcoming = describe_next(next_action(progress, records))
+    merged = {task_id: text for task_id, record in records.items()
+              if (text := describe_merge(record.get("merge")))}
+    safe = {task["id"]: bool(task.get("parallel_safe")) for task in plan["tasks"]}
+    print("\n" + format_plan_progress(progress, next_step=upcoming, merged=merged, safe=safe))
+    branch = branch_line(load_integration(runs_dir, run_id))
+    if branch:
+        print(branch)
     budget = format_budget(runs_dir, run_id)
     if budget:
         print(budget)

@@ -77,3 +77,9 @@ def test_every_command_loads_the_tokens_first(tmp_path, monkeypatch):
 def test_the_tests_never_read_the_real_env_file(no_env_file):
     import os
     assert os.environ[ENV_FILE_VARIABLE] == str(no_env_file) and not no_env_file.exists()
+
+
+def test_the_parallel_setting_is_read_too_but_no_other_name(tmp_path):
+    """M7.3: a plain number, not a secret; it is the only name besides the two tokens."""
+    path = env_file(tmp_path, "AGENT_LAB_MAX_PARALLEL=2\nAGENT_LAB_WORKTREE_ROOT=/x\nANTHROPIC_API_KEY=k\n")
+    assert read_env_file(path) == {"AGENT_LAB_MAX_PARALLEL": "2"}
