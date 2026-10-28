@@ -328,6 +328,7 @@ class _Pipeline:
             release_agent(self.runs_dir, self.run_id, self.task["id"])
         self.agents[name] = {
             "outcome": outcome.outcome,
+            "attempt": self.attempt,  # M7.8: a continue may keep this result; the screens say from when
             **_agent_metrics(outcome.result),
         }
         reason = None
@@ -358,10 +359,13 @@ class _Pipeline:
             return None
 
     def suite(self) -> tc.CommandResult:
+        # Nothing is committed yet, so the uncommitted files are everything this task changed.
+        touched = tc.changed_paths(self.worktree)
+        scope = tc.suite_scope(self.worktree, touched)[1]
         self.log.emit("suite_started", command=list(self.test_command),
-                      timeout_seconds=self.test_timeout)
+                      timeout_seconds=self.test_timeout, scope=scope)
         result = tc.run_suite(self.worktree, command=self.test_command,
-                              timeout=self.test_timeout, env=self.env)
+                              timeout=self.test_timeout, env=self.env, touched=touched)
         self.log.emit("suite_finished", **_command_fields(result))
         return result
 
@@ -400,6 +404,21 @@ class _Pipeline:
         self.findings = ta.Findings(**{k: v for k, v in saved.items() if k in fields})
         # A 4.5 checkpoint had no "reused": its "agents" then held both.
         self.reused = {**(checkpoint.get("reused") or {}), **(checkpoint.get("agents") or {})}
+
+    def show_kept(self) -> None:
+        """Put the kept results in the record now, not only when the task ends (M7.8).
+
+        Without this, while a continued task's reviewer runs, status and the dashboard show
+        the builder and tester as "not started": their results came from the stopped attempt.
+        """
+        try:
+            update_task(self.runs_dir, self.run_id, self.task["id"], {
+                "reused_agents": self.reused,
+                "checks": self.checks,
+                "findings": {k: getattr(self.findings, k) for k in self.findings.__dataclass_fields__},
+            })
+        except (OSError, RunRegistryError, ValueError):
+            pass  # only the display is behind; the task itself goes on
 
     # -- stages --
     def build(self) -> bool:
@@ -660,6 +679,7 @@ def run_task(
                   and pipeline.run_tests() and pipeline.checkpoint("reviewing"))
         else:
             pipeline.restore(continue_from["checkpoint"])  # type: ignore[index]
+            pipeline.show_kept()
             go = start == "reviewing" or (pipeline.run_tests() and pipeline.checkpoint("reviewing"))
         if go:
             pipeline.review()

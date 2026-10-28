@@ -91,6 +91,7 @@ def _agent_dict(view: progress.AgentView) -> dict[str, Any]:
         "cost_usd": view.cost_usd,
         "stale": view.stale,
         "from_record": view.from_record,
+        "kept_from": view.kept_from,  # M7.8: finished in this earlier attempt, result kept
     }
 
 
@@ -263,7 +264,8 @@ class DashboardData:
         merging = bool(record and record.get("merging") and status in ACTIVE_STATUSES)
         active = (progress.STAGE_ROLE.get(status) if status in ACTIVE_STATUSES and not merging
                   else None)
-        cost = round(sum(a["cost_usd"] or 0.0 for a in agents.values()), 6)
+        # This attempt's spending: a kept agent was paid for in the attempt it ran in.
+        cost = round(sum(a["cost_usd"] or 0.0 for a in agents.values() if a["kept_from"] is None), 6)
         return {
             "id": task_id,
             "title": (planned or record or {}).get("title", ""),
@@ -304,8 +306,10 @@ class DashboardData:
             if tab == "orchestrator":
                 return task_events_path(self.runs_dir, run_id, task_id), "orchestrator"
             if tab in ROLE_NAMES:
-                try:
-                    attempt = progress.attempt_of(load_task(self.runs_dir, run_id, task_id))
+                try:  # a kept agent's events are in the attempt it ran in (M7.8)
+                    attempt = progress.agent_attempt(run_id, task_id, tab,
+                                                     load_task(self.runs_dir, run_id, task_id),
+                                                     self.runner_script)
                 except RunRegistryError:
                     attempt = 1
                 agent_run = progress.agent_run_id(run_id, task_id, tab, attempt)

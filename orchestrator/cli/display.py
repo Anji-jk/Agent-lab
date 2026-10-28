@@ -126,7 +126,9 @@ def display_task(record: dict) -> None:
         check = (record.get("checks") or {}).get(key)
         if check:
             verdict = "passed" if check["exit_code"] == 0 and not check["timed_out"] else "FAILED"
-            print(f"{label + ':':<13}{verdict} (exit {check['exit_code']}, {check['seconds']}s)")
+            which = {"project": ", the project's tests only",
+                     "whole": ", orchestrator tests included"}.get(str(check.get("scope")), "")
+            print(f"{label + ':':<13}{verdict} (exit {check['exit_code']}, {check['seconds']}s{which})")
     if record.get("reasons"):
         print("Because:")
         for reason in record["reasons"]:

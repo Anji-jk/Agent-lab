@@ -61,6 +61,7 @@
   }
   function agentLabel(a) {
     if (!a || a.state === "not started") return "not started";
+    if (a.kept_from != null) return `${a.status || "finished"} in attempt ${a.kept_from} (kept)`;
     if (a.state === "running" || a.state === "starting") return a.stale ? "no heartbeat" : a.state;
     return a.status || "finished";
   }
@@ -310,8 +311,10 @@
   function command(check) {
     if (!check || check.exit_code === undefined) return null;
     const took = typeof check.seconds === "number" ? ` in ${check.seconds.toFixed(1)}s` : "";
-    if (check.timed_out) return `timed out${took}`;
-    return check.exit_code === 0 ? `passed${took}` : `failed (exit ${check.exit_code})${took}`;
+    // M7.8: a task's suite covers the project's tests only, unless it touched the orchestrator.
+    const which = { project: ", the project's tests only", whole: ", orchestrator tests included" }[check.scope] || "";
+    if (check.timed_out) return `timed out${took}${which}`;
+    return check.exit_code === 0 ? `passed${took}${which}` : `failed (exit ${check.exit_code})${took}${which}`;
   }
 
   const MERGE_KIND = { "fast-forward": "fast-forward", merge: "real merge (full suite run)", already: "already there" };
@@ -383,6 +386,10 @@
       return card("Not started yet", kv([["Job", a.purpose], ["Runs with", a.settings], ["When", waits]]));
     }
     if (agentLive(a)) return card("About this agent", kv([["Job", a.purpose], ["Runs with", a.settings]]));
+    // M7.8: a continued task does not run again the agents that finished before it stopped.
+    const kept = a.kept_from != null
+      ? `This agent ran in attempt ${a.kept_from}. The task stopped after it finished, so this attempt kept its result and did not run it again.`
+      : null;
     let rows;
     if (name === "builder") {
       rows = [["Files changed", c.builder_changed], ["Outside the plan", f.scope_violations],
@@ -399,6 +406,7 @@
               ["Problems", f.reviewer_problems], ["Notes", f.reviewer_notes]];
     }
     rows.unshift(["Job", a.purpose]);
+    if (kept) rows.unshift(["Kept", kept]);
     return card("Report", kv(rows));
   }
 

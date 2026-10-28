@@ -440,6 +440,11 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+# M7.8: a task's suite runs the project's tests only, unless it touched the orchestrator.
+SUITE_TITLES = {"project": "test suite (the project's tests)",
+                "whole": "full test suite (orchestrator included)"}
+
+
 def _merge_outcome(entry: dict[str, Any]) -> dict[str, Any]:
     """The result of a merge into the run's branch, for its merge_started item."""
     if entry.get("step") == "merge_failed":
@@ -499,7 +504,8 @@ def _step_item(index: int, entry: dict[str, Any]) -> Item:
                     awaits_result=True)
     if step == "suite_started":
         command = " ".join(map(str, entry.get("command") or []))
-        return item("step", "full test suite", command, awaits_result=True)
+        title = SUITE_TITLES.get(str(entry.get("scope")), "full test suite")
+        return item("step", title, command, awaits_result=True)
     if step == "named_tests_started":
         tests = entry.get("tests") or []
         return item("step", f"the tester's {_count(len(tests), 'named test')}", _lines(tests),

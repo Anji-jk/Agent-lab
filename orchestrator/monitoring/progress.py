@@ -12,7 +12,7 @@ heartbeat at least every 5 seconds, so 30 seconds is six missed beats.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,7 @@ class AgentView:
     cost_usd: float | None
     status: str | None  # the runner's final status, once finished
     from_record: bool = False  # no progress file: taken from the task record's summary
+    kept_from: int | None = None  # M7.8: its result was kept from this earlier, stopped attempt
 
     @property
     def stale(self) -> bool:
@@ -98,6 +99,8 @@ class AgentView:
         if self.state == "not started":
             return f"{self.role}: not started"
         parts = [f"{self.role}: {self.state if self.status is None else self.status}"]
+        if self.kept_from is not None:
+            parts[0] += f" in attempt {self.kept_from}, result kept"
         parts.append(f"{self.turns} turns")
         if not self.from_record:  # the record has no cached-token counts, so its totals mislead
             parts.append(f"{_short(self.tokens_read)} tokens read, {_short(self.tokens_written)} written")
@@ -161,15 +164,66 @@ def agent_view_from_record(role: str, summary: object) -> AgentView | None:
     )
 
 
+def _kept(record: dict[str, Any], role: str) -> dict[str, Any] | None:
+    """The role's result that a continued attempt kept from a stopped one (M4.5), if any."""
+    kept = record.get("reused_agents")
+    summary = kept.get(role) if isinstance(kept, dict) else None
+    return summary if isinstance(summary, dict) else None
+
+
+def kept_attempt(run_id: str, task_id: str, role: str, record: dict[str, Any],
+                 runner_script: Path) -> int | None:
+    """Which earlier attempt the kept agent ran in, or None when this attempt runs its own.
+
+    The record says so since M7.8; for an older record, the latest earlier attempt that left
+    this agent's progress file is taken.
+    """
+    current = attempt_of(record)
+    summary = _kept(record, role)
+    if summary is None:
+        return None
+    if read_progress(progress_path(agent_run_id(run_id, task_id, role, current), runner_script)):
+        return None  # this attempt runs the agent again after all
+    said = summary.get("attempt")
+    if isinstance(said, int) and not isinstance(said, bool) and 1 <= said < current:
+        return said
+    for attempt in range(current - 1, 0, -1):
+        if read_progress(progress_path(agent_run_id(run_id, task_id, role, attempt), runner_script)):
+            return attempt
+    return current - 1 if current > 1 else None
+
+
+def agent_attempt(run_id: str, task_id: str, role: str, record: dict[str, Any],
+                  runner_script: Path) -> int:
+    """The attempt whose files show this agent: its kept attempt, else the current one."""
+    kept = kept_attempt(run_id, task_id, role, record, runner_script)
+    return attempt_of(record) if kept is None else kept
+
+
 def task_agent_view(run_id: str, task_id: str, role: str, record: dict[str, Any],
                 runner_script: Path, now: datetime) -> AgentView:
-    """Live progress if the runner left a file, else the record's summary, else not started."""
+    """Live progress if the runner left a file, else the record's summary, else not started.
+
+    A continued task keeps the results of agents that finished before it stopped; those
+    show as finished in the attempt they ran in, not as "not started" (M7.8).
+    """
     progress = read_progress(progress_path(agent_run_id(run_id, task_id, role, attempt_of(record)), runner_script))
     if progress is not None:
         return agent_view(role, progress, now)
     agents = record.get("agents")
     summary = agents.get(role) if isinstance(agents, dict) else None
-    return agent_view_from_record(role, summary) or agent_view(role, None, now)
+    view = agent_view_from_record(role, summary)
+    if view is not None:
+        return view
+    kept_from = kept_attempt(run_id, task_id, role, record, runner_script)
+    if kept_from is not None:
+        earlier = read_progress(progress_path(agent_run_id(run_id, task_id, role, kept_from),
+                                              runner_script))
+        kept = (agent_view(role, earlier, now) if earlier is not None
+                else agent_view_from_record(role, _kept(record, role)))
+        if kept is not None:
+            return replace(kept, kept_from=kept_from, heartbeat_age=None)
+    return agent_view(role, None, now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +239,8 @@ class TaskView:
 
     @property
     def spent_usd(self) -> float:
-        return round(sum(a.cost_usd or 0.0 for a in self.agents), 6)
+        """What this attempt spent: a kept agent was paid for by the attempt it ran in."""
+        return round(sum(a.cost_usd or 0.0 for a in self.agents if a.kept_from is None), 6)
 
 
 def run_status(
