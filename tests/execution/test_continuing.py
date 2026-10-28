@@ -1,4 +1,4 @@
-"""M4.5: continue a stopped task from its stage."""
+"""Continue a stopped task from its stage."""
 
 from pathlib import Path
 
@@ -111,7 +111,7 @@ def test_tasks_that_are_not_continued(world, agents, setup, expected):
 
 
 def test_a_task_continued_after_the_run_moved_on_is_merged_into_the_run_branch(with_independent, agents):
-    """M7.3: with the run's branch, tasks side by side may finish in any order."""
+    """With the run's branch, tasks side by side may finish in any order."""
     world = with_independent
     stopped = stop_at(world, agents, "tester")  # T1 stopped; its process is gone
     use_note(agents)
@@ -160,7 +160,7 @@ def test_continuing_does_not_use_up_the_retry(world, agents):
 
 def test_run_task_continue_cannot_run_in_the_background(world, monkeypatch, capsys):
     import orchestrator.cli.commands as cli
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *args: None)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *args: None)
     code = cli.main(["run-task", RUN_ID, "T1", "--continue", "--background",
                      "--plans-dir", str(world["plans"]), "--runs-dir", str(world["runs"]),
                      "--repo-path", str(world["repo"])])

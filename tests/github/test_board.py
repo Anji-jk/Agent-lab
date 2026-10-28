@@ -1,4 +1,4 @@
-"""M5.1: connect the board. A fake GitHub stands in: no network, nothing written."""
+"""Connect the board. A fake GitHub stands in: no network, nothing written."""
 
 import io
 import json
@@ -187,7 +187,7 @@ def test_the_saved_board_has_no_token(tmp_path):
 
 def test_board_connect_prints_the_columns_and_saves(tmp_path, monkeypatch, capsys):
     github = FakeGitHub()
-    monkeypatch.setattr(cli, "ProjectClient",
+    monkeypatch.setattr(cli.board, "ProjectClient",
                         lambda owner, number, token, token_variable: client(github, token, token_variable))
     monkeypatch.setenv(PROJECT_TOKEN_VARIABLE, SECRET)
     code = cli.main(["board", "connect", "--project", "2", "--runs-dir", str(tmp_path)])
@@ -201,7 +201,7 @@ def test_board_connect_prints_the_columns_and_saves(tmp_path, monkeypatch, capsy
 
 def test_board_connect_refuses_with_the_reason(tmp_path, monkeypatch, capsys):
     github = FakeGitHub(status_type="text")
-    monkeypatch.setattr(cli, "ProjectClient",
+    monkeypatch.setattr(cli.board, "ProjectClient",
                         lambda owner, number, token, token_variable: client(github, token, token_variable))
     code = cli.main(["board", "connect", "--project", "2", "--runs-dir", str(tmp_path)])
     assert code == cli.EXIT_REFUSED

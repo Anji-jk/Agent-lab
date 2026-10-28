@@ -1,4 +1,4 @@
-"""One summary of a run (M4.8): what was done, on which branch, for how much.
+"""One summary of a run: what was done, on which branch, for how much.
 
 ``status`` shows a run while it works; this is what you read afterwards. It
 answers: where is the result (the run's branch and its commit), what did it
@@ -12,9 +12,9 @@ time, while a run works or long after. ``run-plan`` saves it to
 ``--save`` saves it too. Secrets in the text (reasons can quote command output)
 are masked.
 
-The run's branch is its integration branch (M7.1), into which every finished task
-is merged. A run from before M7.1 has none: then it is the branch of the task that
-finished last, since from M4.2 every task starts from the newest finished work.
+The run's branch is its integration branch, into which every finished task
+is merged. A run from before runs had a branch has none: then it is the branch of the task that
+finished last, since every task starts from the newest finished work.
 """
 
 from __future__ import annotations
@@ -29,8 +29,9 @@ from typing import Any
 from orchestrator.execution.integration import KIND_WORDS, describe_merge, load_integration
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.budget import format_budget, task_spent
-from orchestrator.monitoring.event_feed import mask_secrets
-from orchestrator.monitoring.progress import attempt_of, planner_view
+from orchestrator.core.attempts import attempt_of
+from orchestrator.core.secrets import mask_secrets
+from orchestrator.monitoring.progress import planner_view
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.run_registry import run_directory
 from orchestrator.records.task_registry import TASK_RECORD_NAME, list_tasks, task_directory
@@ -61,7 +62,7 @@ class TaskReport:
     commit: str | None
     branch: str | None
     attempts: tuple[AttemptReport, ...] = ()
-    merge: str | None = None       # how its work reached the run's branch (M7.6)
+    merge: str | None = None       # how its work reached the run's branch
 
 
 @dataclass
@@ -152,7 +153,7 @@ def ran_together(spans: dict[str, list[tuple[datetime, datetime]]]) -> list[list
     """Groups of tasks whose working times overlapped, each in order of its first start.
 
     Two tasks are in one group when one of their attempts overlapped, or when each
-    overlapped a third task's (M7.6).
+    overlapped a third task's.
     """
     group = {task_id: task_id for task_id in spans}
 
@@ -250,7 +251,7 @@ def build_report(
     if ends:
         report.finished_at = max(ends).isoformat()
     integration = load_integration(runs_dir, run_id)
-    if integration is not None:  # the run's own branch holds every merged task (M7.1)
+    if integration is not None:  # the run's own branch holds every merged task
         report.branch = integration["branch"]
         report.head_commit = integration.get("head") or integration.get("base_commit")
         report.merges = [f"{m.get('task')} {KIND_WORDS.get(str(m.get('kind')), m.get('kind'))}"

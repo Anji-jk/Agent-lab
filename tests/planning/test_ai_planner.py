@@ -1,7 +1,6 @@
 """AI planning with a fake planning agent: Claude is never launched."""
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,7 @@ from orchestrator.planning.ai_planner import (
     repository_context,
 )
 from orchestrator.errors import ExecutionRefused
-from orchestrator.legacy.planning import build_plan
+from orchestrator.planning.plan import build_plan
 from orchestrator.execution.runner_adapter import RunnerOutcome
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 from orchestrator.github.issue import Task

@@ -1,4 +1,4 @@
-"""M7.2: run-plan runs each task as its own process and watches it."""
+"""Run-plan runs each task as its own process and watches it."""
 
 import os
 import sys
@@ -183,8 +183,8 @@ def test_the_cli_runs_each_task_as_its_own_process(world, monkeypatch):
         seen.update(kwargs)
         raise SystemExit(0)
 
-    monkeypatch.setattr(cli, "work_through_plan", fake_work)
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *a: None)
+    monkeypatch.setattr(cli.run, "work_through_plan", fake_work)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *a: None)
     with pytest.raises(SystemExit):
         cli.main(["run-plan", RUN_ID, "--plans-dir", str(world["plans"]),
                   "--runs-dir", str(world["runs"]), "--repo-path", str(world["repo"]),
@@ -202,8 +202,8 @@ def cli_run_plan(world, monkeypatch, *extra, **environ):
         seen.update(kwargs)
         raise SystemExit(0)
 
-    monkeypatch.setattr(cli, "work_through_plan", fake_work)
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *a: None)
+    monkeypatch.setattr(cli.run, "work_through_plan", fake_work)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *a: None)
     monkeypatch.delenv("AGENT_LAB_MAX_PARALLEL", raising=False)
     for key, value in environ.items():
         monkeypatch.setenv(key, value)

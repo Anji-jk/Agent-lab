@@ -1,4 +1,4 @@
-"""A spending limit for a whole run (M4.6).
+"""A spending limit for a whole run.
 
 Every agent already has its own cap, taken from its task's size, so no single
 agent can run away. What those caps do not stop is many sensible tasks, and
@@ -22,9 +22,9 @@ When an agent is not started for this reason:
 Spent means what the run's task agents have cost, across every attempt,
 read from the agents' progress files and the task records. The planner is
 not counted: it ran before the budget could be set. No budget file means no
-run limit, as before M4.6.
+run limit, as before tasks could run side by side.
 
-Tasks side by side (M7.4). Agents already running in other tasks have not spent
+Tasks side by side. Agents already running in other tasks have not spent
 their whole cap yet, but they may. So the rule counts them too: what is spent,
 plus what each running agent of another task may still spend (its cap minus what
 it has cost so far, so nothing is counted twice), plus the new agent's cap, must
@@ -48,7 +48,8 @@ from typing import Any
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution.roles import ROLE_NAMES
-from orchestrator.monitoring.progress import agent_run_id, attempt_of, progress_path, read_progress
+from orchestrator.core.attempts import agent_run_id, attempt_of
+from orchestrator.monitoring.progress import progress_path, read_progress
 from orchestrator.records.run_registry import (
     RunRegistryError, locked, run_directory, utc_now, write_json_atomic,
 )
@@ -176,7 +177,7 @@ def budget_problem(runs_dir: Path, run_id: str, role: str, cap_usd: float,
     """Why the next agent may not start, or None when it may (or there is no budget).
 
     With ``task_id`` and ``is_alive``, what agents running in the run's other tasks may
-    still spend is counted too (M7.4).
+    still spend is counted too.
     """
     limit = load_budget(runs_dir, run_id)
     if limit is None:

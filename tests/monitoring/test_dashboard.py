@@ -1,4 +1,4 @@
-"""M3.5: the local dashboard server, and the events and dashboard commands."""
+"""The local dashboard server, and the events and dashboard commands."""
 
 import http.client
 import json
@@ -31,7 +31,7 @@ LIVE_PID = 4242
 
 
 def running_t1(pid):
-    """T1's process is alive: its command line is T1's run-task (M5.0)."""
+    """T1's process is alive: its command line is T1's run-task."""
     return f"python -m orchestrator run-task {RUN} T1" if pid == LIVE_PID else None
 
 
@@ -225,57 +225,13 @@ def test_a_broken_file_gives_an_error_not_a_crash(lab, server):
 @pytest.fixture
 def cli_lab(lab, monkeypatch):
     original = dash.DashboardData
-    monkeypatch.setattr(cli.dash, "DashboardData",
+    monkeypatch.setattr(cli.monitor.dash, "DashboardData",
                         lambda runs, plans: original(runs, plans, runner_script=lab["script"]))
     return lab
 
 
 def run_cli(lab, *args):
     return cli.main([*args, "--runs-dir", str(lab["runs"]), "--plans-dir", str(lab["plans"])])
-
-
-def test_events_prints_an_agents_story(cli_lab, capsys):
-    assert run_cli(cli_lab, "events", RUN, "T1", "--role", "builder") == cli.EXIT_OK
-    out = capsys.readouterr().out
-    assert "started" in out and "Read      src/a.py" in out and "└ ok      300 lines" in out
-
-
-def test_events_defaults_to_the_orchestrator_and_shows_waiting_steps(cli_lab, capsys):
-    run_cli(cli_lab, "events", RUN, "T1")
-    out = capsys.readouterr().out
-    assert "full test suite" in out and "waiting..." in out
-
-
-def test_events_follow_stops_once_the_source_is_finished(cli_lab, capsys, monkeypatch):
-    monkeypatch.setattr(cli.time, "sleep", lambda s: pytest.fail("should not wait"))
-    assert run_cli(cli_lab, "events", RUN, "T1", "--role", "builder", "--follow") == cli.EXIT_OK
-    assert capsys.readouterr().out.rstrip().endswith("-- finished --")
-
-
-def test_events_follow_waits_while_the_orchestrator_works(cli_lab, capsys, monkeypatch):
-    sleeps = []
-
-    def finish_after_one_wait(seconds):
-        sleeps.append(seconds)
-        path = task_events_path(cli_lab["runs"], RUN, "T1")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"at": "2026-10-22T10:09:00+00:00", "step": "suite_finished",
-                                "exit_code": 0, "timed_out": False, "seconds": 480.0, "passed": True,
-                                "output_tail": "5 passed"}) + "\n")
-        for status in ("reviewing", "done"):
-            update_task(cli_lab["runs"], RUN, "T1", {"status": status})
-
-    monkeypatch.setattr(cli.time, "sleep", finish_after_one_wait)
-    run_cli(cli_lab, "events", RUN, "T1", "--follow")
-    out = capsys.readouterr().out
-    assert sleeps == [cli.EVENTS_POLL_SECONDS]
-    assert "waiting..." not in out  # a step is printed only once its outcome is known
-    assert "passed in 480.0s" in out and out.rstrip().endswith("-- finished --")
-
-
-def test_events_for_an_unknown_task_says_so(cli_lab, capsys):
-    run_cli(cli_lab, "events", RUN, "T7", "--role", "builder")
-    assert "No events recorded" in capsys.readouterr().out
 
 
 def test_dashboard_command_prints_its_address_and_stops_on_ctrl_c(cli_lab, capsys, monkeypatch):
@@ -347,3 +303,13 @@ def test_a_process_check_is_reused_for_a_few_seconds(lab, monkeypatch):
 def test_the_page_marks_an_interrupted_task():
     js = (dash.STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
     assert 'status === "interrupted"' in js and '"Interrupted"' in js
+
+
+def test_an_unreadable_plan_is_logged_not_swallowed(lab, caplog):
+    import logging
+    (lab["plans"] / RUN / "plan.json").write_text("{broken", encoding="utf-8")
+    data = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"])
+    with caplog.at_level(logging.WARNING, logger=dash.LOG.name):
+        data.run(RUN)
+        data.runs()
+    assert "its plan could not be read" in caplog.text and RUN in caplog.text

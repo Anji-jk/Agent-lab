@@ -19,6 +19,7 @@ should look. Only the orchestrator moves a task to ``done``.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,8 @@ from orchestrator.records.run_registry import (
     utc_now,
     write_json_atomic,
 )
-from orchestrator.planning.plan_file import TASK_ID_PATTERN
+
+TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 
 TASK_RECORD_NAME = "task.json"
 
@@ -81,6 +83,18 @@ def validate_task_transition(current: str, new: str) -> None:
 def task_directory(runs_dir: Path, run_id: str, task_id: str) -> Path:
     validate_task_id(task_id)
     return run_directory(runs_dir, run_id) / "tasks" / task_id
+
+
+LOG_FILE_NAME = "run-task.log"  # what a background run-task prints
+LAUNCH_FILE_NAME = "launch.json"  # the process a task was started as
+
+
+def log_path(runs_dir: Path, run_id: str, task_id: str) -> Path:
+    return task_directory(runs_dir, run_id, task_id) / LOG_FILE_NAME
+
+
+def launch_path(runs_dir: Path, run_id: str, task_id: str) -> Path:
+    return task_directory(runs_dir, run_id, task_id) / LAUNCH_FILE_NAME
 
 
 def _record_path(runs_dir: Path, run_id: str, task_id: str) -> Path:

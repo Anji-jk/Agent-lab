@@ -1,4 +1,4 @@
-"""M5.5: an agent stopped by Claude's usage limit says so, instead of "no detail reported"."""
+"""An agent stopped by Claude's usage limit says so, instead of "no detail reported"."""
 
 import json
 import sys

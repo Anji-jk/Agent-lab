@@ -1,4 +1,4 @@
-"""M7.3: run-plan runs the tasks that may run together side by side."""
+"""Run-plan runs the tasks that may run together side by side."""
 
 import json
 import os

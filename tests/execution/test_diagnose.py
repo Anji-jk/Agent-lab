@@ -1,4 +1,4 @@
-"""M5.5: an agent that fails or stops always gets a reason, worked out from its events."""
+"""An agent that fails or stops always gets a reason, worked out from its events."""
 
 import json
 

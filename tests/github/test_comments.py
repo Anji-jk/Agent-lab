@@ -1,4 +1,4 @@
-"""M5.4: what happened is posted on the task Issues, and the run report on the parent."""
+"""What happened is posted on the task Issues, and the run report on the parent."""
 
 from typing import Any
 
@@ -6,7 +6,7 @@ import pytest
 
 from orchestrator.github import comments as cm
 from orchestrator.github import publish as pub
-from orchestrator.github import sync as sy
+from orchestrator.scheduling import board_sync as sy
 from orchestrator.records.task_registry import save_task, update_task
 from github_fakes import PARENT, RUN, FakeIssues, FakeProject, make_lab  # pyright: ignore[reportMissingImports]
 
@@ -191,9 +191,9 @@ def test_the_writes_are_spaced_out(lab):
     assert pauses == [1.0] * 5
 
 
-# --- a cancelled attempt says what it had done (M5.5) ------------------------------------------
+# --- a cancelled attempt says what it had done ------------------------------------------
 
-from orchestrator.scheduling.left_behind import AgentLeft, FileChange, LastTests, LeftBehind  # noqa: E402
+from orchestrator.execution.left_behind import AgentLeft, FileChange, LastTests, LeftBehind  # noqa: E402
 
 
 def left(**extra):

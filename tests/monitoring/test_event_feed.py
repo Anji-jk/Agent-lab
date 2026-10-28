@@ -1,4 +1,4 @@
-"""M3.4: turning raw event files into readable items."""
+"""Turning raw event files into readable items."""
 
 import json
 
@@ -120,7 +120,7 @@ def test_odd_events_are_ignored(tmp_path):
     assert [i.title for i in items] == ["result of an earlier call"]
 
 
-# Shaped like a real builder run on Windows (M3.2): the full suite outlived Bash's 120 s
+# Shaped like a real builder run on Windows: the full suite outlived Bash's 120 s
 # wait and went to the background, Claude finished, and the suite ending woke it again.
 REAL_SHAPES = [
     {"type": "system", "subtype": "init", "cwd": CWD, "model": "claude-sonnet-5-5", "tools": ["Read", "Bash"],
@@ -175,7 +175,7 @@ def test_a_run_that_woke_up_again_reads_as_it_happened(tmp_path):
 
 
 def test_an_ordinary_command_ending_is_not_called_a_background_command(tmp_path):
-    # Seen on Windows (M3.6): Claude sends task_started and task_notification for every
+    # Seen on Windows: Claude sends task_started and task_notification for every
     # Bash command, including ones that finished in the foreground.
     stream = [
         {"type": "assistant", "message": {"id": "m1", "content": [

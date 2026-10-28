@@ -1,4 +1,4 @@
-"""M4.6: the run budget."""
+"""The run budget."""
 
 import pytest
 

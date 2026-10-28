@@ -12,7 +12,7 @@ An item is one thing that happened: the agent said something, called a tool
 
 Everything here only reads. Text from these files is untrusted -- it holds
 whatever the agent read -- so strings that look like secrets are masked and
-long output is shortened. Masking is best effort; the sandbox (M6) is the
+long output is shortened. Masking is best effort; the sandbox is the
 real protection.
 """
 
@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from orchestrator.core.secrets import MASK, mask_secrets  # noqa: F401
+
 HEAD_LINES = 40
 TAIL_LINES = 40
 MAX_DETAIL_CHARS = 16_000
@@ -32,18 +34,6 @@ MAX_TITLE = 160
 EVENTS_FILE_NAME = "events.jsonl"
 EVENT_TIMES_FILE_NAME = "event_times.txt"
 
-_SECRET_PATTERNS = (
-    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/-]{16,}=*"),
-)
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY)[A-Z0-9_]*)"
-    r"(\s*[=:]\s*)(['\"]?)([^\s'\"]{6,})"
-)
 # System events that repeat what other events already show, or carry nothing readable.
 _QUIET_SYSTEM = frozenset({"thinking_tokens", "permission_denied", "background_tasks_changed",
                            "status", "hook_started", "hook_response"})
@@ -51,15 +41,6 @@ _BACKGROUNDED = re.compile(r"(?i)moved to the background")
 _BLOCKED = re.compile(
     r"(?i)permission|not allowed|denied|requires approval|was blocked|haven't granted"
 )
-MASK = "[masked]"
-
-
-def mask_secrets(text: str) -> str:
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub(lambda m: f"{m.group(1)} {MASK}" if m.lastindex else MASK, text)
-    return _SECRET_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{MASK}", text)
-
-
 def shorten(text: str, *, full: bool = False) -> tuple[str, bool]:
     """``text`` cut to its first and last lines unless ``full``; True if anything was cut."""
     if full:
@@ -288,161 +269,169 @@ def _money(value: object) -> str:
     return f"${value:.4f}" if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
 
 
+class _AgentStory:
+    """Builds the readable story of one agent, one event at a time."""
+
+    def __init__(self, times: list[str]) -> None:
+        self.times = times
+        self.items: list[Item] = []
+        self.tools: dict[str, Item] = {}
+        self.seen: set[tuple[str, str]] = set()
+        self.trim = _PathTrimmer()
+        self.started = False
+        # Claude reports every command it runs as a "task", and sends a notification when
+        # each one ends. Only the ones it moved to the background are worth a line.
+        self.backgrounded: set[str] = set()
+
+    def add(self, kind: str, title: str, **kwargs: Any) -> Item:
+        item = Item(index=len(self.items), kind=kind, title=title, **kwargs)
+        self.items.append(item)
+        return item
+
+    def take(self, number: int, event: dict[str, Any]) -> None:
+        # Claude stamps its assistant and user events; the runner's times file covers the rest.
+        stamp = event.get("timestamp")
+        at = stamp if isinstance(stamp, str) and stamp else (
+            self.times[number].strip()
+            if number < len(self.times) and self.times[number].strip() else None)
+        kind = event.get("type")
+        # Other event types (stream deltas, rate-limit notices) add nothing readable.
+        handler = {"system": self.system, "rate_limit_event": self.rate_limit,
+                   "assistant": self.assistant, "user": self.user,
+                   "result": self.result}.get(str(kind))
+        if handler is not None:
+            handler(number, event, at)
+
+    def system(self, number: int, event: dict[str, Any], at: str | None) -> None:
+        subtype = str(event.get("subtype") or "system")
+        if subtype == "init":
+            self.trim.set_root(event.get("cwd"))
+            tool_names = _list(event.get("tools"))
+            model = event.get("model") or "default model"
+            detail = "\n".join(filter(None, [
+                f"model: {model}",
+                f"Claude Code {event.get('claude_code_version')}" if event.get("claude_code_version") else "",
+                f"working folder: {event.get('cwd')}" if event.get("cwd") else "",
+                f"permission mode: {event.get('permissionMode')}" if event.get("permissionMode") else "",
+                "tools: " + ", ".join(map(str, tool_names)) if tool_names else "tools: none",
+            ]))
+            title = (f"session started · {model} · {len(tool_names)} tools" if not self.started
+                     else "session woke up again")
+            self.add("start", title, detail=detail, at=at)
+            self.started = True
+        elif subtype in ("task_started", "task_updated"):
+            patch = _dict(event.get("patch")) if subtype == "task_updated" else event
+            if patch.get("is_backgrounded") is True and event.get("task_id"):
+                self.backgrounded.add(str(event["task_id"]))
+        elif subtype == "task_notification":
+            # A command Claude had moved to the background has ended; this wakes the session.
+            if str(event.get("task_id")) not in self.backgrounded:
+                return  # an ordinary command; its result is already shown
+            status = str(event.get("status") or "finished")
+            self.add("step", f"background command {status}: {_one_line(str(event.get('summary') or ''))}",
+                     detail=json.dumps(event, ensure_ascii=False, indent=2), at=at,
+                     status="ok" if status == "completed" else "error")
+        elif subtype not in _QUIET_SYSTEM:
+            self.add("step", subtype.replace("_", " "),
+                     detail=json.dumps(event, ensure_ascii=False, indent=2), at=at)
+
+    def rate_limit(self, number: int, event: dict[str, Any], at: str | None) -> None:
+        info = _dict(event.get("rate_limit_info"))
+        if info.get("status") == "allowed_warning":  # near a limit, still allowed
+            self.add("step", f"rate limit warning ({info.get('rateLimitType', 'limit')})",
+                     detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="warn")
+        elif info.get("status") not in (None, "allowed"):
+            self.add("error", f"rate limited ({info.get('rateLimitType', 'limit')}: {info.get('status')})",
+                     detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="error")
+
+    def assistant(self, number: int, event: dict[str, Any], at: str | None) -> None:
+        message = _dict(event.get("message"))
+        message_id = str(message.get("id") or f"line-{number}")
+        for block in _list(message.get("content")):
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                self._tool_call(block, message_id, at)
+            elif block_type in ("text", "thinking"):
+                self._words(block, block_type, message_id, at)
+
+    def _tool_call(self, block: dict[str, Any], message_id: str, at: str | None) -> None:
+        tool_id = str(block.get("id") or f"{message_id}-{len(self.items)}")
+        if ("tool", tool_id) in self.seen:
+            return
+        self.seen.add(("tool", tool_id))
+        name = str(block.get("name") or "tool")
+        data = _dict(block.get("input"))
+        self.tools[tool_id] = self.add("tool", _tool_title(name, data, self.trim),
+                                       detail=_tool_detail(name, data), at=at,
+                                       tool=name, awaits_result=True)
+
+    def _words(self, block: dict[str, Any], block_type: str, message_id: str, at: str | None) -> None:
+        text = str(block.get("text") if block_type == "text" else block.get("thinking") or "")
+        if not text.strip() or (message_id, text) in self.seen:
+            return
+        self.seen.add((message_id, text))
+        title = _one_line(text)
+        self.add("say" if block_type == "text" else "think", title,
+                 detail=text if text.strip() != title else "", at=at)
+
+    def user(self, number: int, event: dict[str, Any], at: str | None) -> None:
+        for block in _list(_dict(event.get("message")).get("content")):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            text = _result_text(block.get("content"))
+            status = "ok"
+            if block.get("is_error"):
+                status = "blocked" if _BLOCKED.search(text) else "error"
+            elif _BACKGROUNDED.search(text[:300]) or _dict(event.get("tool_use_result")).get("backgroundTaskId"):
+                status = "background"
+                task_id = _dict(event.get("tool_use_result")).get("backgroundTaskId")
+                if task_id:
+                    self.backgrounded.add(str(task_id))
+            owner = self.tools.get(str(block.get("tool_use_id")))
+            result = {"status": status, "detail": text, "at": at,
+                      "summary": self.trim.in_text(_result_summary(owner.tool if owner else None, text, status))}
+            if owner is not None and owner.result is None:
+                owner.result = result
+            else:
+                self.add("tool", "result of an earlier call", result=result, at=at)
+
+    def result(self, number: int, event: dict[str, Any], at: str | None) -> None:
+        failed = bool(event.get("is_error")) or event.get("subtype") not in (None, "success")
+        parts = ["error: " + str(event.get("subtype")) if failed else "succeeded"]
+        if isinstance(event.get("num_turns"), int):
+            parts.append(f"{event['num_turns']} turns")
+        if _money(event.get("total_cost_usd")):
+            parts.append(_money(event.get("total_cost_usd")) + " total")
+        if isinstance(event.get("duration_ms"), (int, float)):
+            parts.append(f"{event['duration_ms'] / 1000:.1f}s")
+        self.add("error" if failed else "finish", " · ".join(parts),
+                 detail=str(event.get("result") or ""), at=at)
+
+
 def agent_items(events_path: Path, times_path: Path | None = None) -> list[Item]:
     """The readable story of one agent, from its runner folder's event files."""
     events_path = Path(events_path)
     if times_path is None:
         times_path = events_path.with_name(EVENT_TIMES_FILE_NAME)
-    times = _read_lines(times_path)
-    items: list[Item] = []
-    tools: dict[str, Item] = {}
-    seen: set[tuple[str, str]] = set()
-    trim = _PathTrimmer()
-
-    def add(kind: str, title: str, **kwargs: Any) -> Item:
-        item = Item(index=len(items), kind=kind, title=title, **kwargs)
-        items.append(item)
-        return item
-
-    started = False
-    # Claude reports every command it runs as a "task", and sends a notification when
-    # each one ends. Only the ones it moved to the background are worth a line.
-    backgrounded: set[str] = set()
+    story = _AgentStory(_read_lines(times_path))
     for number, event in _json_lines(events_path):
-        # Claude stamps its assistant and user events; the runner's times file covers the rest.
-        stamp = event.get("timestamp")
-        at = stamp if isinstance(stamp, str) and stamp else (
-            times[number].strip() if number < len(times) and times[number].strip() else None)
-        kind = event.get("type")
-
-        if kind == "system":
-            subtype = str(event.get("subtype") or "system")
-            if subtype == "init":
-                trim.set_root(event.get("cwd"))
-                tool_names = _list(event.get("tools"))
-                model = event.get("model") or "default model"
-                detail = "\n".join(filter(None, [
-                    f"model: {model}",
-                    f"Claude Code {event.get('claude_code_version')}" if event.get("claude_code_version") else "",
-                    f"working folder: {event.get('cwd')}" if event.get("cwd") else "",
-                    f"permission mode: {event.get('permissionMode')}" if event.get("permissionMode") else "",
-                    "tools: " + ", ".join(map(str, tool_names)) if tool_names else "tools: none",
-                ]))
-                title = (f"session started · {model} · {len(tool_names)} tools" if not started
-                         else "session woke up again")
-                add("start", title, detail=detail, at=at)
-                started = True
-            elif subtype in ("task_started", "task_updated"):
-                patch = _dict(event.get("patch")) if subtype == "task_updated" else event
-                if patch.get("is_backgrounded") is True and event.get("task_id"):
-                    backgrounded.add(str(event["task_id"]))
-            elif subtype == "task_notification":
-                # A command Claude had moved to the background has ended; this wakes the session.
-                if str(event.get("task_id")) not in backgrounded:
-                    continue  # an ordinary command; its result is already shown
-                status = str(event.get("status") or "finished")
-                add("step", f"background command {status}: {_one_line(str(event.get('summary') or ''))}",
-                    detail=json.dumps(event, ensure_ascii=False, indent=2), at=at,
-                    status="ok" if status == "completed" else "error")
-            elif subtype not in _QUIET_SYSTEM:
-                add("step", subtype.replace("_", " "),
-                    detail=json.dumps(event, ensure_ascii=False, indent=2), at=at)
-            continue
-
-        if kind == "rate_limit_event":
-            info = _dict(event.get("rate_limit_info"))
-            if info.get("status") == "allowed_warning":  # near a limit, still allowed
-                add("step", f"rate limit warning ({info.get('rateLimitType', 'limit')})",
-                    detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="warn")
-            elif info.get("status") not in (None, "allowed"):
-                add("error", f"rate limited ({info.get('rateLimitType', 'limit')}: {info.get('status')})",
-                    detail=json.dumps(info, ensure_ascii=False, indent=2), at=at, status="error")
-            continue
-
-        if kind == "assistant":
-            message = _dict(event.get("message"))
-            message_id = str(message.get("id") or f"line-{number}")
-            content = _list(message.get("content"))
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                if block_type == "tool_use":
-                    tool_id = str(block.get("id") or f"{message_id}-{len(items)}")
-                    if ("tool", tool_id) in seen:
-                        continue
-                    seen.add(("tool", tool_id))
-                    name = str(block.get("name") or "tool")
-                    data = _dict(block.get("input"))
-                    tools[tool_id] = add("tool", _tool_title(name, data, trim),
-                                         detail=_tool_detail(name, data), at=at,
-                                         tool=name, awaits_result=True)
-                elif block_type in ("text", "thinking"):
-                    text = str(block.get("text") if block_type == "text" else block.get("thinking") or "")
-                    if not text.strip() or (message_id, text) in seen:
-                        continue
-                    seen.add((message_id, text))
-                    title = _one_line(text)
-                    add("say" if block_type == "text" else "think", title,
-                        detail=text if text.strip() != title else "", at=at)
-            continue
-
-        if kind == "user":
-            content = _list(_dict(event.get("message")).get("content"))
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                text = _result_text(block.get("content"))
-                status = "ok"
-                if block.get("is_error"):
-                    status = "blocked" if _BLOCKED.search(text) else "error"
-                elif _BACKGROUNDED.search(text[:300]) or _dict(event.get("tool_use_result")).get("backgroundTaskId"):
-                    status = "background"
-                    task_id = _dict(event.get("tool_use_result")).get("backgroundTaskId")
-                    if task_id:
-                        backgrounded.add(str(task_id))
-                owner = tools.get(str(block.get("tool_use_id")))
-                result = {"status": status, "detail": text, "at": at,
-                          "summary": trim.in_text(_result_summary(owner.tool if owner else None, text, status))}
-                if owner is not None and owner.result is None:
-                    owner.result = result
-                else:
-                    add("tool", "result of an earlier call", result=result, at=at)
-            continue
-
-        if kind == "result":
-            failed = bool(event.get("is_error")) or event.get("subtype") not in (None, "success")
-            parts = ["error: " + str(event.get("subtype")) if failed else "succeeded"]
-            if isinstance(event.get("num_turns"), int):
-                parts.append(f"{event['num_turns']} turns")
-            if _money(event.get("total_cost_usd")):
-                parts.append(_money(event.get("total_cost_usd")) + " total")
-            if isinstance(event.get("duration_ms"), (int, float)):
-                parts.append(f"{event['duration_ms'] / 1000:.1f}s")
-            add("error" if failed else "finish", " · ".join(parts),
-                detail=str(event.get("result") or ""), at=at)
-            continue
-        # Other event types (stream deltas, rate-limit notices) add nothing readable.
-
-    return items
+        story.take(number, event)
+    return story.items
 
 
 # --- the orchestrator's own log -----------------------------------------------------------
 
 _PAIRS = {"agent_started": "agent_finished", "suite_started": "suite_finished",
           "named_tests_started": "named_tests_finished"}
-_PAIRS["merge_started"] = "merged"  # M7.6: or merge_failed
+_PAIRS["merge_started"] = "merged"  # or merge_failed
 _ENDINGS = {end: start for start, end in _PAIRS.items()}
 _ENDINGS["merge_failed"] = "merge_started"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-# M7.8: a task's suite runs the project's tests only, unless it touched the orchestrator.
-SUITE_TITLES = {"project": "test suite (the project's tests)",
-                "whole": "full test suite (orchestrator included)"}
 
 
 def _merge_outcome(entry: dict[str, Any]) -> dict[str, Any]:
@@ -481,6 +470,121 @@ def _command_outcome(entry: dict[str, Any]) -> dict[str, Any]:
             "detail": tail, "at": entry.get("at")}
 
 
+def _builder_checked(item: Any, entry: dict[str, Any]) -> Item:
+    changed = entry.get("changed") or []
+    bad = entry.get("scope_violations") or entry.get("nothing_changed") or entry.get("blocked")
+    detail = "changed:\n" + (_lines(changed) or "(nothing)")
+    if entry.get("scope_violations"):
+        detail += "\noutside the plan:\n" + _lines(entry["scope_violations"])
+    if entry.get("blocked"):
+        detail += f"\nbuilder says it is blocked: {entry['blocked']}"
+    return item("step", f"builder's changes checked: {_count(len(changed), 'file')}", detail,
+                "error" if bad else "ok")
+
+
+def _tester_checked(item: Any, entry: dict[str, Any]) -> Item:
+    changed, named = entry.get("changed") or [], entry.get("named_tests") or []
+    bad = any(entry.get(k) for k in ("outside_tests", "weakened_tests", "invalid_test_ids",
+                                     "suspected_defects"))
+    sections = [("changed", changed), ("tests named", named),
+                ("written outside tests/", entry.get("outside_tests")),
+                ("existing tests weakened", entry.get("weakened_tests")),
+                ("invalid test ids", entry.get("invalid_test_ids")),
+                ("suspected defects", entry.get("suspected_defects"))]
+    detail = "\n".join(f"{label}:\n{_lines(values)}" for label, values in sections if values)
+    return item("step", f"tester's changes checked: {_count(len(changed), 'file')}, "
+                        f"{_count(len(named), 'test')} named",
+                detail, "error" if bad else "ok")
+
+
+def _reviewer_checked(item: Any, entry: dict[str, Any]) -> Item:
+    bad = entry.get("verdict") != "pass" or entry.get("unmet") or entry.get("problems")
+    detail = ""
+    if entry.get("unmet"):
+        detail += "criteria not met: " + ", ".join(map(str, entry["unmet"])) + "\n"
+    if entry.get("problems"):
+        detail += "problems:\n" + _lines(entry["problems"])
+    return item("step", f"reviewer verdict: {entry.get('verdict')}", detail.strip(),
+                "error" if bad else "ok")
+
+
+def _stage_stopped(item: Any, entry: dict[str, Any]) -> Item:
+    reasons = entry.get("reasons") or []
+    return item("error", "stopped: " + _one_line(str(reasons[0]) if reasons else "a check failed"),
+                _lines(reasons), "error")
+
+
+def _decided(item: Any, entry: dict[str, Any]) -> Item:
+    status = entry.get("status")
+    return item("step", f"decision: {status}", _lines(entry.get("reasons")),
+                "ok" if status == "done" else "error")
+
+
+def _merge_without_start(item: Any, entry: dict[str, Any]) -> Item:
+    """A merge result whose start is not in the log (not expected)."""
+    outcome = _merge_outcome(entry)
+    return item("step" if entry["step"] == "merged" else "error", f"merge: {outcome['summary']}",
+                outcome["detail"], outcome["status"])
+
+
+def _task_cancelled(item: Any, entry: dict[str, Any]) -> Item:
+    stopped = entry.get("stopped") or []
+    detail = "\n".join(filter(None, [
+        f"stopped processes: {', '.join(map(str, stopped))}" if stopped else "no process was still running",
+        f"agents that were running: {', '.join(entry.get('agents') or [])}" if entry.get("agents") else "",
+        f"left alone, now another program: {', '.join(map(str, entry['not_ours']))}" if entry.get("not_ours") else "",
+    ]))
+    return item("error", "task cancelled", detail, "error")
+
+
+def _task_finished(item: Any, entry: dict[str, Any]) -> Item:
+    status = entry.get("status")
+    money = _money(entry.get("cost_usd"))
+    return item("finish" if status == "done" else "error",
+                f"task finished: {status}" + (f" · {money}" if money else ""),
+                status="ok" if status == "done" else "error")
+
+
+# step -> how it reads. Each takes (item, entry) and returns the Item; ``item`` builds one.
+_STEP_ITEMS: dict[str, Any] = {
+    "task_started": lambda item, e: item(
+        "start", f"task started from commit {str(e.get('base_commit', ''))[:12]}",
+        str(e.get("title", ""))),
+    "worktree_created": lambda item, e: item(
+        "step", f"worktree ready on {e.get('branch')}", str(e.get("path", "")), "ok"),
+    "worktree_failed": lambda item, e: item(
+        "error", "the worktree could not be created", str(e.get("error", "")), "error"),
+    "stage": lambda item, e: item("step", f"stage: {e.get('status')}"),
+    "agent_started": lambda item, e: item(
+        "step", f"{e.get('role')} agent", str(e.get("settings", "")), awaits_result=True),
+    "suite_started": lambda item, e: item(
+        "step", "full test suite", " ".join(map(str, e.get("command") or [])), awaits_result=True),
+    "named_tests_started": lambda item, e: item(
+        "step", f"the tester's {_count(len(e.get('tests') or []), 'named test')}",
+        _lines(e.get("tests") or []), awaits_result=True),
+    "builder_checked": _builder_checked,
+    "tester_checked": _tester_checked,
+    "reviewer_checked": _reviewer_checked,
+    "stage_stopped": _stage_stopped,
+    "report_unusable": lambda item, e: item(
+        "error", f"the {e.get('role')}'s report was unusable", str(e.get("error", "")), "error"),
+    "decided": _decided,
+    "committed": lambda item, e: item(
+        "step", f"committed {str(e.get('commit', ''))[:10]} on {e.get('branch')}",
+        str(e.get("commit", "")), "ok"),
+    "merge_started": lambda item, e: item(
+        "step", "merging into the run's branch", str(e.get("commit", "")), awaits_result=True),
+    "merged": _merge_without_start,
+    "merge_failed": _merge_without_start,
+    "commit_incomplete": lambda item, e: item(
+        "error", "commit incomplete", str(e.get("error") or _lines(e.get("reasons"))), "error"),
+    "pipeline_crashed": lambda item, e: item(
+        "error", "pipeline crashed", str(e.get("error") or _lines(e.get("reasons"))), "error"),
+    "task_cancelled": _task_cancelled,
+    "task_finished": _task_finished,
+}
+
+
 def _step_item(index: int, entry: dict[str, Any]) -> Item:
     step = str(entry.get("step"))
     at = entry.get("at") if isinstance(entry.get("at"), str) else None
@@ -490,96 +594,9 @@ def _step_item(index: int, entry: dict[str, Any]) -> Item:
         return Item(index=index, kind=kind, title=title, detail=detail, at=at, status=status,
                     extra={"step": step}, **kw)
 
-    if step == "task_started":
-        return item("start", f"task started from commit {str(entry.get('base_commit', ''))[:12]}",
-                    str(entry.get("title", "")))
-    if step == "worktree_created":
-        return item("step", f"worktree ready on {entry.get('branch')}", str(entry.get("path", "")), "ok")
-    if step == "worktree_failed":
-        return item("error", "the worktree could not be created", str(entry.get("error", "")), "error")
-    if step == "stage":
-        return item("step", f"stage: {entry.get('status')}")
-    if step == "agent_started":
-        return item("step", f"{entry.get('role')} agent", str(entry.get("settings", "")),
-                    awaits_result=True)
-    if step == "suite_started":
-        command = " ".join(map(str, entry.get("command") or []))
-        title = SUITE_TITLES.get(str(entry.get("scope")), "full test suite")
-        return item("step", title, command, awaits_result=True)
-    if step == "named_tests_started":
-        tests = entry.get("tests") or []
-        return item("step", f"the tester's {_count(len(tests), 'named test')}", _lines(tests),
-                    awaits_result=True)
-    if step == "builder_checked":
-        changed = entry.get("changed") or []
-        bad = entry.get("scope_violations") or entry.get("nothing_changed") or entry.get("blocked")
-        detail = "changed:\n" + (_lines(changed) or "(nothing)")
-        if entry.get("scope_violations"):
-            detail += "\noutside the plan:\n" + _lines(entry["scope_violations"])
-        if entry.get("blocked"):
-            detail += f"\nbuilder says it is blocked: {entry['blocked']}"
-        return item("step", f"builder's changes checked: {_count(len(changed), 'file')}", detail,
-                    "error" if bad else "ok")
-    if step == "tester_checked":
-        changed, named = entry.get("changed") or [], entry.get("named_tests") or []
-        bad = any(entry.get(k) for k in ("outside_tests", "weakened_tests", "invalid_test_ids",
-                                         "suspected_defects"))
-        sections = [("changed", changed), ("tests named", named),
-                    ("written outside tests/", entry.get("outside_tests")),
-                    ("existing tests weakened", entry.get("weakened_tests")),
-                    ("invalid test ids", entry.get("invalid_test_ids")),
-                    ("suspected defects", entry.get("suspected_defects"))]
-        detail = "\n".join(f"{label}:\n{_lines(values)}" for label, values in sections if values)
-        return item("step", f"tester's changes checked: {_count(len(changed), 'file')}, "
-                            f"{_count(len(named), 'test')} named",
-                    detail, "error" if bad else "ok")
-    if step == "reviewer_checked":
-        bad = entry.get("verdict") != "pass" or entry.get("unmet") or entry.get("problems")
-        detail = ""
-        if entry.get("unmet"):
-            detail += "criteria not met: " + ", ".join(map(str, entry["unmet"])) + "\n"
-        if entry.get("problems"):
-            detail += "problems:\n" + _lines(entry["problems"])
-        return item("step", f"reviewer verdict: {entry.get('verdict')}", detail.strip(),
-                    "error" if bad else "ok")
-    if step == "stage_stopped":
-        reasons = entry.get("reasons") or []
-        return item("error", "stopped: " + _one_line(str(reasons[0]) if reasons else "a check failed"),
-                    _lines(reasons), "error")
-    if step == "report_unusable":
-        return item("error", f"the {entry.get('role')}'s report was unusable",
-                    str(entry.get("error", "")), "error")
-    if step == "decided":
-        status = entry.get("status")
-        return item("step", f"decision: {status}", _lines(entry.get("reasons")),
-                    "ok" if status == "done" else "error")
-    if step == "committed":
-        return item("step", f"committed {str(entry.get('commit', ''))[:10]} on {entry.get('branch')}",
-                    str(entry.get("commit", "")), "ok")
-    if step == "merge_started":
-        return item("step", "merging into the run's branch", str(entry.get("commit", "")),
-                    awaits_result=True)
-    if step in ("merged", "merge_failed"):  # without its start (not expected)
-        outcome = _merge_outcome(entry)
-        return item("step" if step == "merged" else "error", f"merge: {outcome['summary']}",
-                    outcome["detail"], outcome["status"])
-    if step in ("commit_incomplete", "pipeline_crashed"):
-        return item("error", step.replace("_", " "),
-                    str(entry.get("error") or _lines(entry.get("reasons"))), "error")
-    if step == "task_cancelled":
-        stopped = entry.get("stopped") or []
-        detail = "\n".join(filter(None, [
-            f"stopped processes: {', '.join(map(str, stopped))}" if stopped else "no process was still running",
-            f"agents that were running: {', '.join(entry.get('agents') or [])}" if entry.get("agents") else "",
-            f"left alone, now another program: {', '.join(map(str, entry['not_ours']))}" if entry.get("not_ours") else "",
-        ]))
-        return item("error", "task cancelled", detail, "error")
-    if step == "task_finished":
-        status = entry.get("status")
-        money = _money(entry.get("cost_usd"))
-        return item("finish" if status == "done" else "error",
-                    f"task finished: {status}" + (f" · {money}" if money else ""),
-                    status="ok" if status == "done" else "error")
+    build = _STEP_ITEMS.get(step)
+    if build is not None:
+        return build(item, entry)
     return item("step", step.replace("_", " "), json.dumps(rest, ensure_ascii=False, indent=2))
 
 

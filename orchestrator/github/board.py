@@ -1,4 +1,4 @@
-"""Which board, and which column each task state goes in (M5.1).
+"""Which board, and which column each task state goes in.
 
 ``board connect`` reads the project once and saves what the sync needs in
 ``runs/orchestration/board.json``: the project, its Status field, and the

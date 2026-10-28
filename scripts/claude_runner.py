@@ -9,9 +9,10 @@ import shutil
 import subprocess
 import threading
 import time
-import uuid
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -100,7 +101,7 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 # the background (Bash gives up waiting after 120 s), Claude ends its turn, and the
 # command finishing wakes the session for another turn with its own "result" event.
 # Each result's total_cost_usd and modelUsage are running totals for the session, but
-# its num_turns and usage cover only that last part. Seen on Windows, M3.2.
+# its num_turns and usage cover only that last part. Seen on Windows.
 _MODEL_USAGE_FIELDS = {
     "input_tokens": "inputTokens",
     "output_tokens": "outputTokens",
@@ -449,6 +450,171 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
+def _check_request(
+    *,
+    task_id: str,
+    timeout_seconds: int,
+    max_turns: int,
+    read_only: bool,
+    effort: str | None,
+    max_budget_usd: float | None,
+    isolated: bool,
+    tools: str | None,
+    allowed_tools: Sequence[str],
+    disallowed_tools: Sequence[str],
+    role: str | None,
+) -> tuple[list[str], list[str]]:
+    """Refuse a request that cannot be run; return the checked allowed and denied tools."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
+        raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
+
+    if timeout_seconds < 1:
+        raise ValueError("Timeout must be at least 1 second.")
+
+    if max_turns < 1:
+        raise ValueError("max_turns must be at least 1.")
+
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ValueError(f"effort must be one of: {', '.join(EFFORT_LEVELS)}.")
+
+    if max_budget_usd is not None and not max_budget_usd > 0:
+        raise ValueError("max_budget_usd must be greater than 0.")
+
+    allowed = validate_tool_patterns(allowed_tools, "allowed_tools")
+    disallowed = validate_tool_patterns(disallowed_tools, "disallowed_tools")
+    if tools is not None:
+        validate_tool_patterns(tools.split(","), "tools")
+    if read_only and (isolated or tools or allowed or disallowed):
+        raise ValueError("read_only cannot be combined with custom tool settings.")
+    if role is not None and not ROLE_PATTERN.fullmatch(role):
+        raise ValueError("role must be a short lowercase name, such as 'builder'.")
+    return list(allowed), list(disallowed)
+
+
+@dataclass
+class _Stream:
+    """What reading Claude's output collected."""
+
+    event_types: Counter[str] = dataclass_field(default_factory=Counter)
+    result_events: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    parse_errors: int = 0
+    timed_out: bool = False
+    reader_error: str | None = None
+
+
+def _take_event(line: str, result: dict[str, Any], stream: _Stream, progress: ProgressTracker) -> None:
+    """Count one line of Claude's output and update the result and progress with it."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        stream.parse_errors += 1
+        return
+
+    if not isinstance(event, dict):
+        stream.parse_errors += 1
+        return
+
+    result["event_count"] += 1
+    event_type = str(event.get("type", "unknown"))
+    stream.event_types[event_type] += 1
+
+    if event.get("session_id"):
+        result["session_id"] = event["session_id"]
+
+    progress.observe(event)
+    progress.write()
+
+    if event_type == "rate_limit_event":
+        limit = usage_limit(event)
+        if limit:
+            result["rate_limit"] = limit
+
+    if event_type == "result":
+        stream.result_events.append(event)
+        result["claude_result_event"] = event
+        result["result_text"] = event.get("result")
+
+
+def _read_events(
+    process: subprocess.Popen[str],
+    stream: _Stream,
+    result: dict[str, Any],
+    progress: ProgressTracker,
+    *,
+    events_path: Path,
+    times_path: Path,
+    timeout_seconds: int,
+    started_clock: float,
+) -> None:
+    """Read Claude's output until it ends or the time is up, keeping the raw stream."""
+    lines: queue.Queue[str | None] = queue.Queue()
+    assert process.stdout is not None
+    stdout = process.stdout
+
+    def read_stdout() -> None:
+        try:
+            for line in stdout:
+                lines.put(line)
+        except Exception as exc:
+            stream.reader_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+
+    stdout_finished = False
+    with events_path.open(
+        "w", encoding="utf-8", errors="replace"
+    ) as events_file, times_path.open("w", encoding="utf-8") as times_file:
+        while not stdout_finished:
+            elapsed = time.monotonic() - started_clock
+            remaining = timeout_seconds - elapsed
+
+            if remaining <= 0 and process.poll() is None:
+                stream.timed_out = True
+                terminate_process_tree(process)
+
+            try:
+                line = lines.get(timeout=0.2)
+            except queue.Empty:
+                progress.heartbeat()
+                if process.poll() is not None and not reader.is_alive():
+                    break
+                continue
+
+            if line is None:
+                stdout_finished = True
+                continue
+
+            # Preserve the original stream for later debugging.
+            events_file.write(line)
+            events_file.flush()
+            times_file.write(utc_now() + "\n")
+            times_file.flush()
+
+            _take_event(line, result, stream, progress)
+
+    reader.join(timeout=2)
+
+
+def _final_status(result: dict[str, Any], timed_out: bool) -> None:
+    """Decide the run's status from what happened."""
+    if timed_out:
+        result["status"] = "timed_out"
+    elif result["error"]:
+        result["status"] = "failed"
+    elif result.get("is_error") is True:
+        result["status"] = "failed"
+        result["error"] = error_reason(result)
+    elif result["exit_code"] == 0:
+        result["status"] = "succeeded"
+    else:
+        result["status"] = "failed"
+    if result["status"] == "failed" and not result["error"] and result.get("rate_limit"):
+        result["error"] = error_reason(result)
+
+
 def run_task(
     *,
     task_id: str,
@@ -466,29 +632,11 @@ def run_task(
     disallowed_tools: Sequence[str] = (),
     role: str | None = None,
 ) -> dict[str, Any]:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", task_id):
-        raise ValueError("Invalid task ID. Use letters, digits, '.', '_' or '-'.")
-
-    if timeout_seconds < 1:
-        raise ValueError("Timeout must be at least 1 second.")
-
-    if max_turns < 1:
-        raise ValueError("max_turns must be at least 1.")
-
-    if effort is not None and effort not in EFFORT_LEVELS:
-        raise ValueError(f"effort must be one of: {', '.join(EFFORT_LEVELS)}.")
-
-    if max_budget_usd is not None and not max_budget_usd > 0:
-        raise ValueError("max_budget_usd must be greater than 0.")
-
-    allowed_tools = validate_tool_patterns(allowed_tools, "allowed_tools")
-    disallowed_tools = validate_tool_patterns(disallowed_tools, "disallowed_tools")
-    if tools is not None:
-        validate_tool_patterns(tools.split(","), "tools")
-    if read_only and (isolated or tools or allowed_tools or disallowed_tools):
-        raise ValueError("read_only cannot be combined with custom tool settings.")
-    if role is not None and not ROLE_PATTERN.fullmatch(role):
-        raise ValueError("role must be a short lowercase name, such as 'builder'.")
+    allowed_tools, disallowed_tools = _check_request(
+        task_id=task_id, timeout_seconds=timeout_seconds, max_turns=max_turns,
+        read_only=read_only, effort=effort, max_budget_usd=max_budget_usd, isolated=isolated,
+        tools=tools, allowed_tools=allowed_tools, disallowed_tools=disallowed_tools, role=role,
+    )
 
     cwd = cwd.resolve()
     if not cwd.is_dir():
@@ -544,7 +692,6 @@ def run_task(
     }
 
     result.update(extract_usage(None))
-    result_events: list[dict[str, Any]] = []
 
     if command is None:
         result.update(
@@ -577,12 +724,8 @@ def run_task(
         part if part != prompt else "<prompt omitted>" for part in args
     ]
 
-    lines: queue.Queue[str | None] = queue.Queue()
     process: subprocess.Popen[str] | None = None
-    event_types: Counter[str] = Counter()
-    parse_errors = 0
-    timed_out = False
-    reader_error: str | None = None
+    stream = _Stream()
 
     try:
         with stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_file:
@@ -608,83 +751,11 @@ def run_task(
             progress.started(process.pid)
             progress.write(force=True)
 
-            assert process.stdout is not None
-            stdout = process.stdout
-
-            def read_stdout() -> None:
-                nonlocal reader_error
-                try:
-                    for line in stdout:
-                        lines.put(line)
-                except Exception as exc:
-                    reader_error = f"{type(exc).__name__}: {exc}"
-                finally:
-                    lines.put(None)
-
-            reader = threading.Thread(target=read_stdout, daemon=True)
-            reader.start()
-
-            stdout_finished = False
-            with events_path.open(
-                "w", encoding="utf-8", errors="replace"
-            ) as events_file, times_path.open("w", encoding="utf-8") as times_file:
-                while not stdout_finished:
-                    elapsed = time.monotonic() - started_clock
-                    remaining = timeout_seconds - elapsed
-
-                    if remaining <= 0 and process.poll() is None:
-                        timed_out = True
-                        terminate_process_tree(process)
-
-                    try:
-                        line = lines.get(timeout=0.2)
-                    except queue.Empty:
-                        progress.heartbeat()
-                        if process.poll() is not None and not reader.is_alive():
-                            break
-                        continue
-
-                    if line is None:
-                        stdout_finished = True
-                        continue
-
-                    # Preserve the original stream for later debugging.
-                    events_file.write(line)
-                    events_file.flush()
-                    times_file.write(utc_now() + "\n")
-                    times_file.flush()
-
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        parse_errors += 1
-                        continue
-
-                    if not isinstance(event, dict):
-                        parse_errors += 1
-                        continue
-
-                    result["event_count"] += 1
-                    event_type = str(event.get("type", "unknown"))
-                    event_types[event_type] += 1
-
-                    if event.get("session_id"):
-                        result["session_id"] = event["session_id"]
-
-                    progress.observe(event)
-                    progress.write()
-
-                    if event_type == "rate_limit_event":
-                        limit = usage_limit(event)
-                        if limit:
-                            result["rate_limit"] = limit
-
-                    if event_type == "result":
-                        result_events.append(event)
-                        result["claude_result_event"] = event
-                        result["result_text"] = event.get("result")
-
-            reader.join(timeout=2)
+            _read_events(
+                process, stream, result, progress, events_path=events_path,
+                times_path=times_path, timeout_seconds=timeout_seconds,
+                started_clock=started_clock,
+            )
             result["exit_code"] = process.wait()
 
     except Exception as exc:
@@ -694,30 +765,17 @@ def run_task(
         if process is not None:
             result["exit_code"] = process.poll()
 
-    result["timed_out"] = timed_out
-    result["event_types"] = dict(event_types)
-    result["malformed_json_lines"] = parse_errors
+    result["timed_out"] = stream.timed_out
+    result["event_types"] = dict(stream.event_types)
+    result["malformed_json_lines"] = stream.parse_errors
 
-    if reader_error:
-        result["reader_error"] = reader_error
+    if stream.reader_error:
+        result["reader_error"] = stream.reader_error
 
-    result.update(extract_usage(result.get("claude_result_event"), result_events))
-    result["result_count"] = len(result_events)  # more than 1: the session woke up again
+    result.update(extract_usage(result.get("claude_result_event"), stream.result_events))
+    result["result_count"] = len(stream.result_events)  # more than 1: the session woke up again
 
-
-    if timed_out:
-        result["status"] = "timed_out"
-    elif result["error"]:
-        result["status"] = "failed"
-    elif result.get("is_error") is True:
-        result["status"] = "failed"
-        result["error"] = error_reason(result)
-    elif result["exit_code"] == 0:
-        result["status"] = "succeeded"
-    else:
-        result["status"] = "failed"
-    if result["status"] == "failed" and not result["error"] and result.get("rate_limit"):
-        result["error"] = error_reason(result)
+    _final_status(result, stream.timed_out)
 
     result["finished_at"] = utc_now()
     result["duration_seconds"] = round(time.monotonic() - started_clock, 3)

@@ -14,10 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-BUILDER = "builder"
-TESTER = "tester"
-REVIEWER = "reviewer"
-ROLE_NAMES = (BUILDER, TESTER, REVIEWER)
+from orchestrator.core.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER  # noqa: F401
+
 
 TEST_DIR = "tests"
 

@@ -329,7 +329,7 @@ def test_check_environment_removes_credentials(monkeypatch):
         "PATH": "/bin", "ANTHROPIC_API_KEY": "secret", "claude_code_oauth_token": "t",
         "CLAUDE_CONFIG_DIR": "/c", "HOME": "/h"})
     env = tr.check_environment(Path("x"))
-    python_folder = str(Path(tc.project_python()).parent)  # put first on PATH (M3.8)
+    python_folder = str(Path(tc.project_python()).parent)  # put first on PATH
     assert env == {"PATH": python_folder + os.pathsep + "/bin", "HOME": "/h",
                    "PYTHONDONTWRITEBYTECODE": "1"}
 

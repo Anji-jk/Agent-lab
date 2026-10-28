@@ -1,4 +1,4 @@
-"""Put a planned run's tasks on GitHub: one Issue per task, under its parent, on the board (M5.2).
+"""Put a planned run's tasks on GitHub: one Issue per task, under its parent, on the board.
 
 For each task of the plan, three writes, in this order:
 
@@ -92,7 +92,7 @@ def load_items(runs_dir: Path, run_id: str) -> dict[str, dict[str, Any]]:
 
 
 def load_parent(runs_dir: Path, run_id: str) -> dict[str, Any]:
-    """The parent Issue's card (M5.3): its ``issue_id``, ``item_id`` and last ``place``."""
+    """The parent Issue's card: its ``issue_id``, ``item_id`` and last ``place``."""
     parent = _read_items_file(runs_dir, run_id).get("parent")
     return parent if isinstance(parent, dict) else {}
 

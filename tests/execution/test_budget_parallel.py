@@ -1,4 +1,4 @@
-"""M7.4: the run budget counts what agents running in other tasks may still spend."""
+"""The run budget counts what agents running in other tasks may still spend."""
 
 import threading
 

@@ -1,4 +1,4 @@
-"""M5.2: a run's tasks become sub-issues and board cards. Fakes stand in for GitHub."""
+"""A run's tasks become sub-issues and board cards. Fakes stand in for GitHub."""
 
 import io
 import json
@@ -10,6 +10,7 @@ import pytest
 import orchestrator.cli.commands as cli
 from orchestrator.github import client as github_client
 from orchestrator.github import publish as pub
+from orchestrator.scheduling import board_sync as sy
 from orchestrator.github.board import save_board
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.github.projects import ProjectClient
@@ -230,14 +231,16 @@ def test_a_board_write_refusal_never_shows_the_token():
 # --- the command ------------------------------------------------------------------------------------
 
 
-def test_board_publish_previews_by_default(lab, monkeypatch, capsys):
+def test_board_sync_puts_the_tasks_missing_from_the_board_there(lab, monkeypatch, capsys):
     issues, project = FakeIssues(), FakeProject()
-    monkeypatch.setattr(cli, "GitHubClient", lambda repository: issues)
-    monkeypatch.setattr(cli, "ProjectClient", lambda *a, **k: project)
-    code = cli.main(["board", "publish", RUN, "--plans-dir", str(lab["plans"]),
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: (issues, project))
+    monkeypatch.setattr(cli.board, "publish", lambda *a, **k: pub.publish(*a, **{**k, "pause": 0}))
+    monkeypatch.setattr(cli.board, "sync_board", lambda *a, **k: sy.sync_board(*a, **{**k, "pause": 0}))
+    code = cli.main(["board", "sync", RUN, "--plans-dir", str(lab["plans"]),
                      "--runs-dir", str(lab["runs"])])
-    assert code == cli.EXIT_OK and writes(issues, project) == []
-    assert "run again with --yes" in capsys.readouterr().out
+    assert code == cli.EXIT_OK
+    assert [c[0] for c in issues.calls].count("create") == 2
+    assert "Board" in capsys.readouterr().out
 
 
 # --- an Issue already on the board (found live: GitHub answers 422) -----------------------------

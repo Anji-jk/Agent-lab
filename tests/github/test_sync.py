@@ -1,4 +1,4 @@
-"""M5.3: the cards follow the records; run-plan puts the tasks on the board when it starts."""
+"""The cards follow the records; run-plan puts the tasks on the board when it starts."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ import pytest
 import orchestrator.cli.commands as cli
 from orchestrator.github import client as github_client
 from orchestrator.github import publish as pub
-from orchestrator.github import sync as sy
+from orchestrator.scheduling import board_sync as sy
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.projects import ProjectClient
 from orchestrator.records.task_registry import save_task, update_task
@@ -181,10 +181,10 @@ def args_for(lab, **extra):
 def test_run_plan_puts_the_tasks_on_the_board_when_it_starts(tmp_path, monkeypatch, capsys):
     lab = make_lab(tmp_path)  # planned, nothing on GitHub yet (option B)
     issues, project = FakeIssues(), FakeProject()
-    monkeypatch.setattr(cli, "_board_clients", lambda runs_dir: (issues, project))
-    monkeypatch.setattr(cli, "publish", lambda *a, **k: pub.publish(*a, **{**k, "pause": 0}))
-    monkeypatch.setattr(cli, "sync_board", lambda *a, **k: sy.sync_board(*a, **{**k, "pause": 0}))
-    follower = cli._BoardFollower(args_for(lab))
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: (issues, project))
+    monkeypatch.setattr(cli.board, "publish", lambda *a, **k: pub.publish(*a, **{**k, "pause": 0}))
+    monkeypatch.setattr(cli.board, "sync_board", lambda *a, **k: sy.sync_board(*a, **{**k, "pause": 0}))
+    follower = cli.board.BoardFollower(args_for(lab))
     follower.start()
     assert [c[0] for c in issues.calls].count("create") == 2
     out = capsys.readouterr().out
@@ -196,12 +196,12 @@ def test_run_plan_puts_the_tasks_on_the_board_when_it_starts(tmp_path, monkeypat
 
 def test_no_board_and_no_connection_leave_github_alone(lab, monkeypatch):
     called = []
-    monkeypatch.setattr(cli, "_board_clients", lambda runs_dir: called.append(1))
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: called.append(1))
     skipped = args_for(lab)
     skipped.no_board = True
-    assert cli._BoardFollower(skipped).clients is None  # --no-board
+    assert cli.board.BoardFollower(skipped).clients is None  # --no-board
     (lab["runs"] / "board.json").unlink()
-    assert cli._BoardFollower(args_for(lab)).clients is None  # no board connected
+    assert cli.board.BoardFollower(args_for(lab)).clients is None  # no board connected
     assert called == []
 
 
@@ -211,16 +211,17 @@ def test_a_board_failure_is_a_warning_not_a_stop(lab, monkeypatch, capsys):
             raise github_client.GitHubAPIError("GitHub API returned HTTP 503 for issues.")
 
     (pub.items_path(lab["runs"], RUN)).unlink()
-    monkeypatch.setattr(cli, "_board_clients", lambda runs_dir: (Broken(), FakeProject()))
-    follower = cli._BoardFollower(args_for(lab))
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: (Broken(), FakeProject()))
+    follower = cli.board.BoardFollower(args_for(lab))
     follower.start()  # does not raise
     err = capsys.readouterr().err
     assert "Board publish failed" in err and f"board sync {RUN} catches up later" in err
 
 
 def test_board_sync_command(lab, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_board_clients", lambda runs_dir: (FakeIssues(), FakeProject()))
-    monkeypatch.setattr(cli, "sync_board", lambda *a, **k: sy.sync_board(*a, **{**k, "pause": 0}))
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: (FakeIssues(), FakeProject()))
+    monkeypatch.setattr(cli.board, "publish", lambda *a, **k: pub.publish(*a, **{**k, "pause": 0}))
+    monkeypatch.setattr(cli.board, "sync_board", lambda *a, **k: sy.sync_board(*a, **{**k, "pause": 0}))
     code = cli.main(["board", "sync", RUN, "--plans-dir", str(lab["plans"]),
                      "--runs-dir", str(lab["runs"])])
     assert code == cli.EXIT_OK

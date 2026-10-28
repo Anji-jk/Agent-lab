@@ -1,4 +1,4 @@
-"""M3.8: starting a task's pipeline in the background."""
+"""Starting a task's pipeline in the background."""
 
 import json
 import os
@@ -81,7 +81,7 @@ def test_it_starts_the_ordinary_run_task_command_and_returns_once_the_record_exi
     started = start(world, fake)
     assert fake.started is not None
     command = fake.started["command"]
-    # The project's Python, not whichever one started this (M3.8: system Python had no pytest).
+    # The project's Python, not whichever one started this (system Python had no pytest).
     assert command[:6] == [bg.project_python(), "-m", "orchestrator", "run-task", RUN, "T1"]
     assert "--background" not in command  # the child runs in the foreground: no loop
     assert command[command.index("--runs-dir") + 1] == str(world["runs"].resolve())
@@ -196,7 +196,7 @@ def test_run_task_records_its_process_id(world, monkeypatch):
 
 
 def test_run_task_background_prints_how_to_watch(world, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *_args: None)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *_args: None)
     seen = {}
 
     def fake_start(run_id, task_id, **kw):
@@ -204,7 +204,7 @@ def test_run_task_background_prints_how_to_watch(world, monkeypatch, capsys):
         return bg.Started(pid=777, log=bg.log_path(world["runs"], RUN, "T1"),
                           launch=bg.launch_path(world["runs"], RUN, "T1"), record_seen=True)
 
-    monkeypatch.setattr(cli, "start_task_in_background", fake_start)
+    monkeypatch.setattr(cli.run, "start_task_in_background", fake_start)
     code = cli.main(["run-task", RUN, "T1", "--background", "--plans-dir", str(world["runs"]),
                      "--runs-dir", str(world["runs"]), "--repo-path", str(world["repo"])])
     out = capsys.readouterr().out
@@ -215,7 +215,7 @@ def test_run_task_background_prints_how_to_watch(world, monkeypatch, capsys):
 
 
 def test_run_task_background_refusal_is_an_error_exit(world, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *_args: None)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *_args: None)
     save_task(world["runs"], RUN, "T1", {"title": "x"})
     code = cli.main(["run-task", RUN, "T1", "--background", "--plans-dir", str(world["runs"]),
                      "--runs-dir", str(world["runs"]), "--repo-path", str(world["repo"])])

@@ -1,4 +1,4 @@
-"""Stop a running task and everything it started (M3.9).
+"""Stop a running task and everything it started.
 
 ``python -m orchestrator cancel <run> <task>``:
 
@@ -33,12 +33,11 @@ from typing import Any
 
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
-from orchestrator.execution.background import launch_path
 from orchestrator.execution.roles import ROLE_NAMES
-from orchestrator.monitoring.progress import agent_run_id, attempt_of
+from orchestrator.core.attempts import agent_run_id, attempt_of
 from orchestrator.records.run_registry import utc_now, write_json_atomic
 from orchestrator.records.task_events import TaskLog
-from orchestrator.records.task_registry import FINAL_STATUSES, load_task, update_task
+from orchestrator.records.task_registry import FINAL_STATUSES, launch_path, load_task, update_task
 
 STOP_WAIT_SECONDS = 10.0
 
@@ -116,7 +115,7 @@ def kill_tree(pid: int) -> None:
 def is_task_process(line: str, run_id: str, task_id: str) -> bool:
     """Is this command line the process running the task: its run-task, or the run's run-plan?
 
-    run-plan (M4.7) runs every task in its own process, so a task it runs records
+    run-plan runs every task in its own process, so a task it runs records
     run-plan's process ID; that line names the run but not the task.
     """
     words = line.split()

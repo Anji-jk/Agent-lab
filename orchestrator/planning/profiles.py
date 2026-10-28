@@ -7,9 +7,11 @@ person can read and change, not by the AI.
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 
-from orchestrator.execution.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER
+from orchestrator.core.roles import ROLE_NAMES
 from orchestrator.planning.plan_file import COMPLEXITIES
 
 
@@ -29,13 +31,59 @@ class RunProfile:
         )
 
 
-PROFILES: dict[str, RunProfile] = {
-    "small": RunProfile("small", "sonnet", "low", 10, 600, 1.0),
-    "medium": RunProfile("medium", "sonnet", "medium", 25, 1200, 3.0),
-    "large": RunProfile("large", "opus", "high", 50, 2400, 10.0),
-}
+PROFILES_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "profiles.toml"
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
-assert set(PROFILES) == set(COMPLEXITIES), "every complexity needs a profile"
+
+def _bad(why: str) -> ValueError:
+    return ValueError(f"{PROFILES_FILE.name}: {why}.")
+
+
+def _number(table: dict, key: str, kind: type, where: str, positive: bool = True):
+    value = table.get(key)
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    if not ok or (positive and value <= 0):
+        raise _bad(f"{where}.{key} must be a positive {'whole ' if kind is int else ''}number")
+    return value
+
+
+def load_profiles(path: Path = PROFILES_FILE) -> tuple[dict[str, RunProfile], int, dict[str, tuple[float, float]]]:
+    """(profiles, the least turns an agent gets, each role's (turn share, budget share))."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"{path.name} could not be read: {exc}") from None
+    tables = data.get("profiles") or {}
+    if set(tables) != set(COMPLEXITIES):
+        raise _bad(f"profiles must be exactly {', '.join(COMPLEXITIES)}")
+    profiles = {}
+    for name, table in tables.items():
+        where = f"profiles.{name}"
+        if not isinstance(table.get("model"), str) or not table["model"].strip():
+            raise _bad(f"{where}.model must be a model alias")
+        if table.get("effort") not in EFFORTS:
+            raise _bad(f"{where}.effort must be one of {', '.join(EFFORTS)}")
+        profiles[name] = RunProfile(
+            name, table["model"], table["effort"],
+            _number(table, "max_turns", int, where), _number(table, "timeout_seconds", int, where),
+            float(_number(table, "max_budget_usd", float, where)))
+    shares_table = data.get("shares") or {}
+    if set(shares_table) != set(ROLE_NAMES):
+        raise _bad(f"shares must be exactly {', '.join(ROLE_NAMES)}")
+    shares = {}
+    for role, table in shares_table.items():
+        where = f"shares.{role}"
+        shares[role] = (float(_number(table, "turns", float, where)),
+                        float(_number(table, "budget", float, where)))
+    minimum = data.get("min_role_turns")
+    if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+        raise _bad("min_role_turns must be a positive whole number")
+    return profiles, minimum, shares
+
+
+PROFILES, MIN_ROLE_TURNS, ROLE_SHARES = load_profiles()
 
 
 def profile_for(complexity: str) -> RunProfile:
@@ -46,20 +94,8 @@ def profile_for(complexity: str) -> RunProfile:
 
 
 # --- the three agents of one task ------------------------------------------
-# The profile above is the whole task's allowance. Each agent gets a share of
-# it: the builder does most of the work, the tester less, the reviewer reads
-# one diff. These numbers are starting guesses, to be tuned from real runs.
-
-MIN_ROLE_TURNS = 5
-
-# role -> (share of the turn limit, share of the spending cap)
-ROLE_SHARES: dict[str, tuple[float, float]] = {
-    BUILDER: (1.0, 0.60),
-    TESTER: (0.6, 0.25),
-    REVIEWER: (0.4, 0.15),
-}
-
-assert set(ROLE_SHARES) == set(ROLE_NAMES), "every role needs a share"
+# The profile above is the whole task's allowance; each agent gets a share of it
+# (config/profiles.toml: ROLE_SHARES maps a role to (turn share, spending share)).
 
 
 @dataclass(frozen=True, slots=True)

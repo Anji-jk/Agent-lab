@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+from orchestrator.settings import load_settings
 
 
 class GitHubAPIError(RuntimeError):
@@ -20,15 +21,19 @@ class GitHubClient:
 
     def __init__(
         self,
-        repository: str = "Anji-jk/Agent-lab",
+        repository: str | None = None,
         token: str | None = None,
         timeout: float = 15.0,
     ) -> None:
+        settings = load_settings()
+        repository = repository or settings.repository
+        if not repository:
+            raise ValueError("No repository given: use --repo OWNER/REPO or set AGENT_LAB_REPOSITORY.")
         if "/" not in repository:
             raise ValueError("Repository must be in OWNER/REPO format.")
 
         self.repository = repository
-        self.token = token or os.getenv("GITHUB_TOKEN")
+        self.token = token or settings.github_token
         self.timeout = timeout
         self.base_url = (
             "https://api.github.com/repos/"
@@ -109,7 +114,7 @@ class GitHubClient:
         payload: dict[str, Any],
         method: str = "POST",
     ) -> Any:
-        """Send an authenticated JSON request (POST, or PATCH since M5.3)."""
+        """Send an authenticated JSON request (POST or PATCH)."""
         if not self.token:
             raise GitHubAPIError(
                 "A GITHUB_TOKEN is required for write operations."
@@ -189,7 +194,7 @@ class GitHubClient:
             raise GitHubAPIError("Unexpected response when adding labels.")
         return result
 
-    # --- M5.2: the task Issues ---------------------------------------------------------------
+    # --- the task Issues ---------------------------------------------------------------
 
     def create_issue(self, title: str, body: str) -> dict[str, Any]:
         """Create an Issue; returns it (with its ``id`` and ``number``)."""
@@ -220,7 +225,7 @@ class GitHubClient:
         return found
 
     def close_issue(self, number: int) -> None:
-        """Close an Issue as completed (M5.3: a task that is done)."""
+        """Close an Issue as completed (a task that is done)."""
         if number < 1:
             raise ValueError("Issue number must be positive.")
         self._post_json(f"issues/{number}", {"state": "closed", "state_reason": "completed"},

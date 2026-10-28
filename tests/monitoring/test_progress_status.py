@@ -1,8 +1,7 @@
-"""M3.2: the status command reads task records and agent progress files."""
+"""The status command reads task records and agent progress files."""
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -166,8 +165,8 @@ def test_the_planner_is_shown_when_it_left_progress(layout):
 
 @pytest.fixture
 def cli_layout(layout, monkeypatch):
-    original = pg.runner_adapter.runner_run_directory
-    monkeypatch.setattr(pg.runner_adapter, "runner_run_directory",
+    original = pg.runner_paths.runner_run_directory
+    monkeypatch.setattr(pg.runner_paths, "runner_run_directory",
                         lambda run_id, script=None: original(run_id, layout["script"]))
     return layout
 
@@ -196,14 +195,14 @@ def test_status_of_an_unknown_run_is_an_error(cli_layout, tmp_path, capsys):
 
 def test_watch_stops_by_itself_when_nothing_is_running(cli_layout, monkeypatch, capsys):
     start_task(cli_layout, "T1", "building", "testing", "reviewing", "done")
-    monkeypatch.setattr(cli.os, "system", lambda command: 0)  # don't clear the test's screen
+    monkeypatch.setattr(cli.monitor.os, "system", lambda command: 0)  # don't clear the test's screen
     code = cli.main(["status", RUN, "--runs-dir", str(cli_layout["runs"]), "--watch", "1"])
     assert code == cli.EXIT_OK and "Nothing is running any more." in capsys.readouterr().out
 
 
 def test_watch_refreshes_while_a_task_runs_and_ctrl_c_exits_cleanly(cli_layout, monkeypatch, capsys):
     start_task(cli_layout, "T1", "building")
-    monkeypatch.setattr(cli.os, "system", lambda command: 0)
+    monkeypatch.setattr(cli.monitor.os, "system", lambda command: 0)
     sleeps = []
 
     def fake_sleep(seconds):
@@ -211,7 +210,7 @@ def test_watch_refreshes_while_a_task_runs_and_ctrl_c_exits_cleanly(cli_layout, 
         if len(sleeps) == 2:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli.monitor.time, "sleep", fake_sleep)
     code = cli.main(["status", RUN, "--runs-dir", str(cli_layout["runs"]), "--watch", "2"])
     assert code == cli.EXIT_OK and sleeps == [2.0, 2.0]
     assert capsys.readouterr().out.count("T1  building") == 2

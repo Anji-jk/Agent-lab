@@ -1,4 +1,4 @@
-"""Work through a stored plan: one task at a time, or several side by side (M4.7, M7.3).
+"""Work through a stored plan: one task at a time, or several side by side.
 
 ``run-plan <run>`` does what a person would otherwise do by hand: look at where
 the plan stands, start the next task, and repeat. It keeps no memory of its
@@ -15,19 +15,19 @@ What it does when it looks, in this order:
    with no retry left): stop the whole plan. Independent tasks are not started
    around it: a plan that stops at the first problem is easy to reason about.
 4. An interrupted task (its process went away part-way), or one stopped by the
-   run budget or (after its reset) by Claude's usage limit: continue it in its own worktree (M4.5), before anything new,
+   run budget or (after its reset) by Claude's usage limit: continue it in its own worktree, before anything new,
    because its worktree already holds work that was paid for.
-5. A failed task with its retry left: retry it once, with the findings (M4.4).
+5. A failed task with its retry left: retry it once, with the findings.
 6. Otherwise, the ready tasks in plan order: run them.
 
-Side by side (M7.3): with room for more than one task (``max_parallel``), run-plan
+Side by side: with room for more than one task (``max_parallel``), run-plan
 starts every task it may start together. Two tasks run together only when the plan
 marks both parallel-safe (the planner allows that only for tasks that are not
 ordered and share no file); a task that is not parallel-safe runs alone, and the
 tasks after it in plan order wait for it. Tasks are taken in plan order, so a
 sequential task is never passed over. When one task ends, run-plan looks again: the
 next ready task starts, or a task that depended on it is now ready. The tasks'
-work is merged one at a time into the run's branch (M7.1), and git work that could
+work is merged one at a time into the run's branch, and git work that could
 collide (making a worktree, committing) takes turns.
 
 When a task stops the plan (a person must look, the run budget, Claude's usage
@@ -38,7 +38,7 @@ A task stopped by the run budget stops the whole plan: every later agent would
 meet the same limit. Raise the budget and run ``run-plan`` again; the stopped task
 continues from the stage it reached.
 
-So does a task stopped by Claude's usage limit (M5.5: the five-hour or weekly
+So does a task stopped by Claude's usage limit (the five-hour or weekly
 limit refused an agent). Every later agent would be refused too. Run
 ``run-plan`` again once the limit has reset (the stop message names the time);
 before then it stops at once, and after it the task continues from its stage.
@@ -62,6 +62,9 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.errors import ExecutionRefused
+from orchestrator.settings import (
+    MAX_PARALLEL, load_settings,
+)
 from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
 from orchestrator.execution.cancel import command_line, is_plan_process
@@ -86,9 +89,7 @@ LOCK_FILE_NAME = "run-plan.json"
 SETTLE_SECONDS = 15.0      # how long a task's final status may take to appear (cancel)
 SETTLE_POLL_SECONDS = 0.5
 ACTIONS = ("run", "retry", "continue")
-DEFAULT_MAX_PARALLEL = 3
-MAX_PARALLEL_LIMIT = 8       # more tasks at once would mostly wait on each other's merges
-MAX_PARALLEL_VARIABLE = "AGENT_LAB_MAX_PARALLEL"
+MAX_PARALLEL_VARIABLE = MAX_PARALLEL
 
 
 class PlanAlreadyRunning(ExecutionRefused):
@@ -275,18 +276,7 @@ def next_actions(progress: PlanProgress, records: dict[str, dict[str, Any]], act
 def max_parallel_setting(one_at_a_time: bool = False,
                          environ: Mapping[str, str] | None = None) -> int:
     """How many tasks run-plan runs together: 1 with --one-at-a-time, else the setting or 3."""
-    if one_at_a_time:
-        return 1
-    environ = os.environ if environ is None else environ
-    raw = (environ.get(MAX_PARALLEL_VARIABLE) or "").strip()
-    if not raw:
-        return DEFAULT_MAX_PARALLEL
-    if not raw.isdigit() or not 1 <= int(raw) <= MAX_PARALLEL_LIMIT:
-        raise ExecutionRefused(
-            f"{MAX_PARALLEL_VARIABLE} is {raw!r}; it must be a whole number from 1 to "
-            f"{MAX_PARALLEL_LIMIT} (how many tasks run together). Fix it in .env or the window, "
-            "or use --one-at-a-time.")
-    return int(raw)
+    return 1 if one_at_a_time else load_settings(environ).max_parallel
 
 
 def describe_next(decision: tuple[str, str] | str | None) -> str:
@@ -341,9 +331,9 @@ def run_plan(
 ) -> PlanRun:
     """Run the plan's tasks until it is complete or something stops it.
 
-    ``launch`` starts each step: the CLI passes a ``ProcessLauncher`` (M7.2), so each
+    ``launch`` starts each step: the CLI passes a ``ProcessLauncher``, so each
     task runs as its own process; without one the step runs here, in this process.
-    ``max_parallel`` is how many tasks may run together (M7.3): 1 runs them one at a
+    ``max_parallel`` is how many tasks may run together: 1 runs them one at a
     time, as before; the CLI passes 3 unless told otherwise.
     """
     plan = load_task_plan(plans_dir, run_id)

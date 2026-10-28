@@ -1,4 +1,4 @@
-"""M3.1: the live progress file the runner keeps for every agent."""
+"""The live progress file the runner keeps for every agent."""
 
 import json
 import sys
@@ -233,7 +233,7 @@ def test_every_event_line_gets_a_time_in_a_file_beside_it(tmp_path, fake_claude)
     assert stamps == sorted(stamps) and all(s.tzinfo is not None for s in stamps)
 
 
-# --- totals over a run that woke up again (M3.2: "1 turn" for a 9-minute builder) ------------
+# --- totals over a run that woke up again ("1 turn" for a 9-minute builder) ------------
 
 
 def test_turns_add_up_over_every_result_and_tokens_use_the_running_totals():

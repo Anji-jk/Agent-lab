@@ -1,6 +1,6 @@
-"""run-plan runs each task as its own process and watches it (M7.2).
+"""run-plan runs each task as its own process and watches it.
 
-Before M7.2, run-plan ran a task's pipeline inside its own process, so it could
+Once, run-plan ran a task's pipeline inside its own process, so it could
 do nothing else until the task ended, and a crash in the task was a crash of
 run-plan. Now run-plan starts ``python -m orchestrator run-task <run> <task>``
 (with ``--retry`` or ``--continue`` when that is the step) as a child process,
@@ -166,7 +166,7 @@ class Done:
 
 @dataclass
 class InProcessLauncher:
-    """Runs the step here, to its end, like run-plan before M7.2."""
+    """Runs the step here, to its end, like the first run-plan did."""
     do: Callable[[str, str], Any]  # (action, task) -> the task's record
 
     def __call__(self, action: str, task_id: str) -> Done:

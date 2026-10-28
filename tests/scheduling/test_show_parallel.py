@@ -1,4 +1,4 @@
-"""M7.6: status, the report and the dashboard show several running tasks and the merges."""
+"""Status, the report and the dashboard show several running tasks and the merges."""
 
 import json
 from datetime import datetime, timedelta, timezone

@@ -12,7 +12,6 @@ so neither ends up in orchestrator logs or records.
 from __future__ import annotations
 
 import importlib.util
-import os
 import json
 import subprocess
 import sys
@@ -22,9 +21,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from orchestrator.execution.checks import project_python, with_python_on_path
+from orchestrator.core.runner_paths import DEFAULT_RUNNER_SCRIPT, PROJECT_ROOT, runner_run_directory  # noqa: F401
+from orchestrator.settings import AGENT_RUNS_DIR, process_environment
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "claude_runner.py"
 
 # Extra seconds beyond the runner's own timeout before we give up on it.
 OUTER_TIMEOUT_GRACE = 120
@@ -70,18 +69,7 @@ class RunnerOutcome:
 
 # Must match scripts/claude_runner.py, which reads the same variable. The runner
 # inherits this process's environment, so when it is set both sides use it.
-RUNS_DIR_VARIABLE = "AGENT_LAB_AGENT_RUNS_DIR"
-
-
-def runner_run_directory(
-    run_id: str,
-    runner_script: Path = DEFAULT_RUNNER_SCRIPT,
-) -> Path:
-    """Where the runner will write ``run_id``'s artifacts."""
-    override = os.environ.get(RUNS_DIR_VARIABLE)
-    if override:
-        return Path(override).resolve() / run_id
-    return Path(runner_script).resolve().parent.parent / "runs" / run_id
+RUNS_DIR_VARIABLE = AGENT_RUNS_DIR
 
 
 def load_agent_env(runner_script: Path = DEFAULT_RUNNER_SCRIPT) -> dict[str, str]:
@@ -207,7 +195,7 @@ def invoke_runner(
             check=False,
             # The runner hands PATH on to Claude, so an agent's plain `python` is the
             # project's Python (with pytest), not whichever one is first on PATH.
-            env=with_python_on_path(dict(os.environ) if env is None else env, project_python()),
+            env=with_python_on_path(process_environment() if env is None else env, project_python()),
         )
     except subprocess.TimeoutExpired:
         return RunnerOutcome(

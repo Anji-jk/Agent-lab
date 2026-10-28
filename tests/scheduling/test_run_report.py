@@ -1,4 +1,4 @@
-"""M4.8: one summary of a run: branch, cost, time, and each task's result."""
+"""One summary of a run: branch, cost, time, and each task's result."""
 
 import os
 
@@ -34,7 +34,7 @@ def test_a_complete_run_names_its_branch_and_the_last_commit(world, agents):
     result = report(world)
 
     assert result.plan_state == "complete"
-    # The run's own branch (M7.1) holds both tasks; one at a time, each merge was a
+    # The run's own branch holds both tasks; one at a time, each merge was a
     # fast-forward, so it ends at T2's commit.
     assert result.branch == f"agent/issue-7-{RUN_ID}"
     assert result.head_commit == records["T2"]["commit"]
@@ -42,7 +42,7 @@ def test_a_complete_run_names_its_branch_and_the_last_commit(world, agents):
     assert f"Branch:  {result.branch} at {records['T2']['commit'][:12]}" in shown
     assert f"git log --oneline {world['base'][:12]}..{result.branch}" in shown
     assert "Nothing was pushed, and your own branches were not changed" in shown
-    # M7.6: each merge is shown; one at a time, nothing ran together.
+    # each merge is shown; one at a time, nothing ran together.
     assert "Merges:  T1 fast-forward, T2 fast-forward" in shown
     assert shown.count("merged: fast-forward") == 2
     assert "Together:" not in shown and result.together == []
@@ -176,16 +176,16 @@ def test_the_report_command_prints_and_saves_only_when_asked(world, capsys):
 
 
 def test_run_plan_saves_the_report_when_it_stops(world, agents, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda *a: None)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda *a: None)
     real = rp.run_plan
 
     def fake_agents_run_plan(run_id, **options):
-        # launch=None: the stand-in agents run in this process, not in child processes (M7.2).
+        # launch=None: the stand-in agents run in this process, not in child processes.
         return real(run_id, **{**options, "launch": None, "runner_script": world["script"],
                                "invoke_runner": per_task(agents), "get_command_line": no_process,
                                "env": {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}})
 
-    monkeypatch.setattr(cli, "work_through_plan", fake_agents_run_plan)
+    monkeypatch.setattr(cli.run, "work_through_plan", fake_agents_run_plan)
     code = cli.main(["run-plan", RUN_ID, "--plans-dir", str(world["plans"]),
                      "--runs-dir", str(world["runs"]), "--repo-path", str(world["repo"]),
                      "--worktree-root", str(world["wt"])])

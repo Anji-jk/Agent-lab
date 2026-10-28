@@ -10,4 +10,30 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".","src","scripts"]
+pythonpath = [".","scripts"]
+
+[tool.setuptools.package-data]
+orchestrator = ["prompts/*.md", "prompts/**/*.md", "monitoring/static/*"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = [".venv", "runs"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+# Functions above the limit that were not part of the restructuring. Split one, then
+# remove its line, so the list only shrinks.
+[tool.ruff.lint.per-file-ignores]
+"orchestrator/cli/display.py" = ["C901"]
+"orchestrator/execution/cancel.py" = ["C901"]
+"orchestrator/execution/runner_adapter.py" = ["C901"]
+"orchestrator/execution/task_runner.py" = ["C901"]
+"orchestrator/github/publish.py" = ["C901"]
+"orchestrator/monitoring/dashboard.py" = ["C901"]
+"orchestrator/scheduling/board_sync.py" = ["C901"]
+"orchestrator/scheduling/run_plan.py" = ["C901"]
+"orchestrator/scheduling/run_report.py" = ["C901"]

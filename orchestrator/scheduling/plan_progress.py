@@ -1,4 +1,4 @@
-"""Where a stored plan stands right now (M4.1).
+"""Where a stored plan stands right now.
 
 The planner decides once what the tasks are and which depends on which. This
 module answers the question the plan cannot: which of them are done, failed or
@@ -26,33 +26,20 @@ Each task gets one state:
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.execution import runner_adapter
-from orchestrator.execution.background import launch_path
-from orchestrator.execution.cancel import command_line, is_task_process
-from orchestrator.monitoring.progress import (
-    STAGE_ROLE,
-    agent_run_id,
-    attempt_of,
-    agent_view,
-    progress_path,
-    read_progress,
-)
+from orchestrator.core.runner_paths import DEFAULT_RUNNER_SCRIPT
+from orchestrator.execution.liveness import CommandLine, Liveness, process_liveness  # noqa: F401
 from orchestrator.records.task_registry import list_tasks
 
 RECORDED_STATES = frozenset({"done", "failed", "needs_review", "cancelled"})
 BLOCKING_STATES = frozenset({"failed", "needs_review", "cancelled"})
 REASON_LIMIT = 120
 
-CommandLine = Callable[[int], "str | None"]
-# (task_id, record) -> (still running?, why we think so)
-Liveness = Callable[[str, dict[str, Any]], "tuple[bool, str]"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +52,7 @@ class TaskProgress:
     blocked_by: tuple[str, ...] = ()      # the failed/cancelled tasks that block this one
     waiting_for: tuple[str, ...] = ()     # dependencies not done yet
     reason: str | None = None
-    merging: bool = False                 # running, and merging into the run's branch (M7.6)
+    merging: bool = False                 # running, and merging into the run's branch
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,65 +157,13 @@ def compute_progress(
     return PlanProgress(run_id, ordered, unknown)
 
 
-# --- is a task's process still running? ---------------------------------------------------
-
-
-def _launch_pid(runs_dir: Path, run_id: str, task_id: str) -> int | None:
-    try:
-        data = json.loads(launch_path(runs_dir, run_id, task_id).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    pid = data.get("pid") if isinstance(data, dict) else None
-    return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
-
-
-def process_liveness(
-    runs_dir: Path,
-    run_id: str,
-    *,
-    get_command_line: CommandLine | None = None,
-    runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
-    now: datetime | None = None,
-) -> Liveness:
-    """Checks a task's own process; for older records with no process ID, its heartbeat.
-
-    A process ID counts only while its command line is still this task's
-    ``run-task``: Windows and Linux reuse IDs, so an ID alone proves nothing.
-    """
-    get_command_line = get_command_line or command_line
-
-    def is_alive(task_id: str, record: dict[str, Any]) -> tuple[bool, str]:
-        pids = []
-        for pid in (_launch_pid(runs_dir, run_id, task_id), record.get("pid")):
-            if isinstance(pid, int) and not isinstance(pid, bool) and pid not in pids:
-                pids.append(pid)
-        if pids:
-            for pid in pids:
-                line = get_command_line(pid)
-                if line is not None and is_task_process(line, run_id, task_id):
-                    return True, f"process {pid} is running it"
-            listed = ", ".join(map(str, pids))
-            return False, f"its process ({listed}) is no longer running"
-        role = STAGE_ROLE.get(record["status"])
-        if role is not None:
-            progress = read_progress(
-                progress_path(agent_run_id(run_id, task_id, role, attempt_of(record)), runner_script))
-            if progress is not None:
-                view = agent_view(role, progress, now or datetime.now(timezone.utc))
-                if view.state in ("starting", "running") and view.heartbeat_age is not None and not view.stale:
-                    return True, f"the {role}'s heartbeat is recent"
-        return False, "no process ID was recorded and there is no recent heartbeat"
-
-    return is_alive
-
-
 def plan_progress(
     plan: Mapping[str, Any],
     runs_dir: Path,
     run_id: str,
     *,
     get_command_line: CommandLine | None = None,
-    runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
+    runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     now: datetime | None = None,
 ) -> PlanProgress:
     """Where the stored plan of ``run_id`` stands, read from disk."""
@@ -243,7 +178,7 @@ def plan_progress(
 
 def _waits_for_a_place(task: TaskProgress, running: list[str],
                        safe: Mapping[str, bool] | None) -> str:
-    """Why a ready task has not started while others run (M7.6)."""
+    """Why a ready task has not started while others run."""
     names = ", ".join(running)
     if safe is not None and any(not safe.get(t, False) for t in running):
         return f"can start once {names} {'has' if len(running) == 1 else 'have'} ended ({names} runs by itself)"
@@ -278,7 +213,7 @@ def format_plan_progress(progress: PlanProgress, next_step: str | None = None, *
 
     ``merged`` (task -> how it reached the run's branch) is shown on done tasks, and
     ``safe`` (the plan's parallel-safe marks) says why a ready task waits while others
-    run (M7.6).
+    run.
     """
     done = len(progress.with_state("done"))
     head = f"Plan: {done} of {len(progress.tasks)} done"

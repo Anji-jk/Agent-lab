@@ -1,4 +1,4 @@
-"""M4.4: retry a failed task once, with the findings."""
+"""Retry a failed task once, with the findings."""
 
 import json
 from pathlib import Path
@@ -158,6 +158,16 @@ def test_the_feedback_says_when_the_tests_timed_out_and_cuts_long_text():
     assert "(it timed out)" in text and "(no output)" in text
     assert "... and 8 more" in text
     assert max(len(line) for line in text.splitlines()) <= rt.REASON_CHARS + 2
+
+
+def test_long_output_keeps_its_end_where_pytest_prints_what_failed():
+    from orchestrator.execution import retry as rt
+    tail = "noise\n" * 600 + "FAILED tests/test_x.py::test_it - assert 1 == 2"
+    record = {"task_id": "T1", "status": "failed", "reasons": [],
+              "checks": {"suite": {"exit_code": 1, "timed_out": False, "output_tail": tail}}}
+    text = rt.retry_feedback(record)
+    assert "FAILED tests/test_x.py::test_it - assert 1 == 2" in text
+    assert "…" in text and len(text) < rt.OUTPUT_CHARS + 600
 
 
 def test_agent_ids_and_the_status_follow_the_attempt(world, agents, monkeypatch):

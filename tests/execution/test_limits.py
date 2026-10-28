@@ -1,4 +1,4 @@
-"""M5.5: an agent refused by Claude's usage limit stops the task with the reason, and the
+"""An agent refused by Claude's usage limit stops the task with the reason, and the
 task continues from its stage once the limit has reset."""
 
 from datetime import datetime, timedelta, timezone

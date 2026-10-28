@@ -1,4 +1,4 @@
-"""M4.1: where a stored plan stands, worked out from the task records."""
+"""Where a stored plan stands, worked out from the task records."""
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -11,6 +11,7 @@ from orchestrator.execution.runner_adapter import runner_run_directory
 from orchestrator.planning.plan_file import save_task_plan
 from orchestrator.records.run_registry import write_json_atomic
 from orchestrator.records.task_registry import save_task, update_task
+from orchestrator.execution import liveness
 from orchestrator.scheduling import plan_progress as pp
 
 RUN = "run-p"
@@ -248,11 +249,11 @@ def stored_plan(runs):
 def test_status_shows_the_plan_progress(runs, monkeypatch, capsys):
     stored_plan(runs)
     started(runs, status="testing", pid=111)
-    monkeypatch.setattr(pp, "command_line", lambda pid: None)  # its process has gone
+    monkeypatch.setattr(liveness, "command_line", lambda pid: None)  # its process has gone
     code = cli.main(["status", RUN, "--runs-dir", str(runs), "--plans-dir", str(runs)])
     out = capsys.readouterr().out
     assert code == cli.EXIT_OK
-    # run-plan would continue T1, so the plan is not stopped (M5.0)
+    # run-plan would continue T1, so the plan is not stopped
     assert "Plan: 0 of 2 done · next: continue T1" in out and "stopped:" not in out
     assert "T2   waiting      for T1" in out
 
@@ -268,9 +269,9 @@ def test_status_watch_stops_once_the_only_running_task_is_interrupted(runs, monk
     # Before 4.1 the record's "testing" kept --watch going for ever.
     stored_plan(runs)
     started(runs, status="testing", pid=111)
-    monkeypatch.setattr(pp, "command_line", lambda pid: None)
-    monkeypatch.setattr(cli.time, "sleep", lambda s: pytest.fail("should not wait"))
-    monkeypatch.setattr(cli.os, "system", lambda command: 0)
+    monkeypatch.setattr(liveness, "command_line", lambda pid: None)
+    monkeypatch.setattr(cli.monitor.time, "sleep", lambda s: pytest.fail("should not wait"))
+    monkeypatch.setattr(cli.monitor.os, "system", lambda command: 0)
     code = cli.main(["status", RUN, "--watch", "2", "--runs-dir", str(runs), "--plans-dir", str(runs)])
     assert code == cli.EXIT_OK and "Nothing is running any more." in capsys.readouterr().out
 

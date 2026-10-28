@@ -1,4 +1,4 @@
-"""M5.5: Claude's usage limit stops the whole plan; run-plan goes on after the reset."""
+"""Claude's usage limit stops the whole plan; run-plan goes on after the reset."""
 
 from datetime import datetime, timedelta, timezone
 

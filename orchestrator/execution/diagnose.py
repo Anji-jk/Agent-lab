@@ -1,4 +1,4 @@
-"""Why an agent failed or stopped: always a reason, worked out from what was recorded (M5.5).
+"""Why an agent failed or stopped: always a reason, worked out from what was recorded.
 
 An agent that does not succeed must never be reported as "no detail reported".
 When the runner gave a reason (``error``) it is used. When it did not, the reason is
@@ -23,10 +23,9 @@ Everything is read from ``events.jsonl`` and ``stderr.log`` in the agent's run f
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
-from orchestrator.monitoring.event_feed import mask_secrets
+from orchestrator.core.secrets import mask_secrets
 
 TAIL_BYTES = 200_000   # the end of events.jsonl that is looked at
 TEXT_LIMIT = 300

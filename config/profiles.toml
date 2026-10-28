@@ -1,0 +1,42 @@
+# How much model, effort and budget a task gets (orchestrator/planning/profiles.py).
+# The planner labels each task small, medium or large; this table turns the label into limits,
+# so spending is decided by a table a person can read and change, not by the AI.
+# Reviewed like code: changing it changes what every later run may spend.
+
+# The agents of a task each get a share of the task's turn limit and spending cap: the builder
+# does most of the work, the tester less, the reviewer reads one diff. Starting guesses, to be
+# tuned from real runs.
+min_role_turns = 5
+
+[profiles.small]
+model = "sonnet"
+effort = "low"        # low | medium | high | xhigh | max
+max_turns = 10
+timeout_seconds = 600
+max_budget_usd = 1.0
+
+[profiles.medium]
+model = "sonnet"
+effort = "medium"
+max_turns = 25
+timeout_seconds = 1200
+max_budget_usd = 3.0
+
+[profiles.large]
+model = "opus"
+effort = "high"
+max_turns = 50
+timeout_seconds = 2400
+max_budget_usd = 10.0
+
+[shares.builder]
+turns = 1.0
+budget = 0.60
+
+[shares.tester]
+turns = 0.6
+budget = 0.25
+
+[shares.reviewer]
+turns = 0.4
+budget = 0.15

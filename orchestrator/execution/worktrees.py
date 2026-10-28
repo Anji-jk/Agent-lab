@@ -10,13 +10,14 @@ Safety rules enforced here:
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.core.git import run_git_raw
 from orchestrator.records.run_registry import validate_run_id
+from orchestrator.settings import WORKTREE_ROOT, load_settings
 
 # Conservative subset of valid ref names: no leading '-', no '..', no spaces.
 BASE_REF_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
@@ -37,14 +38,7 @@ def run_git(
     repository_root: Path,
     *args: str,
 ) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repository_root), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return result.stdout.strip()
+    return run_git_raw(repository_root, *args, timeout=30).strip()
 
 
 def _git(root: Path, *args: str) -> str:
@@ -107,15 +101,14 @@ def validate_issue_number(issue_number: object) -> int:
     return issue_number
 
 
-WORKTREE_ROOT_ENV = "AGENT_LAB_WORKTREE_ROOT"
+WORKTREE_ROOT_ENV = WORKTREE_ROOT
 
 
 def default_worktree_root() -> Path:
     """Where task worktrees live: outside the repository and, for most
     people, outside OneDrive, whose sync client slows Git down and can
     lock files. Override with ``AGENT_LAB_WORKTREE_ROOT``."""
-    configured = os.environ.get(WORKTREE_ROOT_ENV)
-    return Path(configured) if configured else Path.home() / "agent-worktrees"
+    return load_settings().worktree_root or Path.home() / "agent-worktrees"
 
 
 def plan_worktree(

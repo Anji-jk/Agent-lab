@@ -16,22 +16,28 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from orchestrator.core.git import run_git_raw
+from orchestrator.errors import ExecutionRefused
+from orchestrator.settings import PYTHON, load_settings
+
 DELETED = "<deleted>"
 
 # Which Python runs the tests, the background pipeline and the agents' `python`.
 # Not simply the one that started the orchestrator: from a terminal without the
-# venv activated that is the system Python, which has no pytest (seen in M3.8).
+# venv activated that is the system Python, which has no pytest.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-PYTHON_VARIABLE = "AGENT_LAB_PYTHON"
+PYTHON_VARIABLE = PYTHON
 PYTEST_CHECK_TIMEOUT_SECONDS = 60
 
 
-def project_python(root: Path = PROJECT_ROOT, environ: dict[str, str] | None = None) -> str:
-    """AGENT_LAB_PYTHON if set, else the project's .venv if it exists, else this Python."""
-    environ = os.environ if environ is None else environ
-    override = environ.get(PYTHON_VARIABLE)
+def project_python(root: Path = PROJECT_ROOT, environ: dict[str, str] | None = None,
+                   configured: str | None = None) -> str:
+    """AGENT_LAB_PYTHON if set, else the project's configured Python, else its .venv, else this one."""
+    override = load_settings(environ).python
     if override:
         return override
+    if configured:
+        return configured
     for candidate in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
         if candidate.is_file():
             return str(candidate)
@@ -64,7 +70,14 @@ def pytest_problem(python: str, env: dict[str, str] | None = None) -> str | None
     return None
 
 
-DEFAULT_TEST_COMMAND = (project_python(), "-m", "pytest", "-q")
+def _import_time_python() -> str:
+    try:
+        return project_python()
+    except ExecutionRefused:  # a bad setting is reported by the command that reads it
+        return sys.executable
+
+
+DEFAULT_TEST_COMMAND = (_import_time_python(), "-m", "pytest", "-q")
 
 # Files that tools leave behind and that are never part of the work.
 _NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache"})
@@ -85,16 +98,7 @@ def _git(worktree: Path, *args: str, timeout: int = 60, stdin: str | None = None
     """Run git in ``worktree`` and return stdout exactly as printed."""
     command = next((a for a in args if not a.startswith("-")), "command")
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(worktree), *args],
-            input=stdin,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+        return run_git_raw(worktree, *args, timeout=timeout, stdin=stdin)
     except subprocess.CalledProcessError as exc:
         # Report git's own message, not the "hint:" lines it prints after it.
         lines = [l for l in (exc.stderr or "").strip().splitlines()
@@ -104,7 +108,6 @@ def _git(worktree: Path, *args: str, timeout: int = 60, stdin: str | None = None
         ) from None
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CheckError(f"git {command} could not run: {type(exc).__name__}") from None
-    return completed.stdout
 
 
 # --- what changed ------------------------------------------------------------
@@ -383,7 +386,6 @@ class CommandResult:
     timed_out: bool
     output_tail: str
     seconds: float
-    scope: str | None = None  # a suite only: "project" or "whole" (M7.8)
 
     @property
     def passed(self) -> bool:
@@ -396,7 +398,6 @@ class CommandResult:
             "timed_out": self.timed_out,
             "seconds": round(self.seconds, 2),
             "output_tail": self.output_tail,
-            **({"scope": self.scope} if self.scope else {}),
         }
 
 
@@ -456,55 +457,14 @@ def valid_test_id(test_id: object, test_dirs: tuple[str, ...]) -> bool:
     return under(test_id.split("::")[0], test_dirs)
 
 
-# The orchestrator still lives in the same repository as the project it works on, so
-# `pytest` at the root runs the orchestrator's ~865 tests too (about 30 minutes) although a
-# task only changes the project. A task's suite therefore leaves out the orchestrator's own
-# test folders (M7.8), unless the task touched the orchestrator, its tests, or a file that
-# every test depends on: then the whole suite runs, as before.
-ORCHESTRATOR_TEST_DIRS = (
-    "tests/cli", "tests/execution", "tests/github", "tests/legacy", "tests/monitoring",
-    "tests/planning", "tests/records", "tests/scheduling", "tests/scripts",
-)
-WHOLE_SUITE_PREFIXES = ("orchestrator/", "scripts/", *(f"{d}/" for d in ORCHESTRATOR_TEST_DIRS))
-WHOLE_SUITE_FILES = frozenset({
-    "pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "conftest.py", "tests/conftest.py",
-})
-
-
-def suite_scope(worktree: Path, touched: list[str] | None) -> tuple[list[str], str]:
-    """The extra pytest arguments for a task's suite, and which suite that is.
-
-    ``touched`` are the paths the work changed; None means unknown, so the whole suite runs.
-    """
-    if touched is None or any(
-        path in WHOLE_SUITE_FILES or path.startswith(WHOLE_SUITE_PREFIXES) for path in touched
-    ):
-        return [], "whole"
-    return [f"--ignore={d}" for d in ORCHESTRATOR_TEST_DIRS if (worktree / d).is_dir()], "project"
-
-
-def _is_pytest(command: tuple[str, ...]) -> bool:
-    return tuple(command[1:3]) == ("-m", "pytest")
-
-
 def run_suite(
     worktree: Path,
     *,
     command: tuple[str, ...] = DEFAULT_TEST_COMMAND,
     timeout: int,
     env: dict[str, str] | None = None,
-    touched: list[str] | None = None,
 ) -> CommandResult:
-    """The test suite in ``worktree``: the project's tests, or all of them (see suite_scope).
-
-    A command that is not ``python -m pytest`` is run exactly as given.
-    """
-    if not _is_pytest(command):
-        return run_command(command, worktree, timeout=timeout, env=env)
-    extra, scope = suite_scope(worktree, touched)
-    result = run_command((*command, *extra), worktree, timeout=timeout, env=env)
-    return CommandResult(result.command, result.exit_code, result.timed_out,
-                         result.output_tail, result.seconds, scope)
+    return run_command(command, worktree, timeout=timeout, env=env)
 
 
 def run_named_tests(

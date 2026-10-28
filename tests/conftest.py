@@ -49,7 +49,8 @@ def agent_runs_dir(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_env_file(tmp_path_factory, monkeypatch):
-    """Commands run in tests never read the real .env and its tokens (M5.1)."""
+    """Commands run in tests never read the real .env and its tokens."""
     missing = tmp_path_factory.mktemp("no-env-file") / ".env"
     monkeypatch.setenv("AGENT_LAB_ENV_FILE", str(missing))
+    monkeypatch.setenv("AGENT_LAB_REPOSITORY", "Anji-jk/Agent-lab")
     return missing

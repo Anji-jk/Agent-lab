@@ -1,4 +1,4 @@
-"""Retry a failed task once, with what went wrong (M4.4).
+"""Retry a failed task once, with what went wrong.
 
 Many failures are fixed once the builder is told precisely what was wrong; more
 than one retry mostly pays for the same mistake again. So a task that ended
@@ -28,14 +28,15 @@ from typing import Any
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
-from orchestrator.execution.background import LAUNCH_FILE_NAME, LOG_FILE_NAME
-from orchestrator.monitoring.event_feed import mask_secrets
-from orchestrator.monitoring.progress import attempt_of
+from orchestrator.core.attempts import attempt_of
+from orchestrator.core.secrets import mask_secrets
 from orchestrator.records.run_registry import locked
 from orchestrator.records.task_events import TASK_EVENTS_FILE_NAME
-from orchestrator.records.task_registry import TASK_RECORD_NAME, load_task, task_directory
+from orchestrator.records.task_registry import (
+    LAUNCH_FILE_NAME, LOG_FILE_NAME, TASK_RECORD_NAME, load_task, task_directory,
+)
 
-MAX_RETRIES = 1  # a continued attempt (M4.5) is not a retry, so attempts are not counted
+MAX_RETRIES = 1  # a continued attempt is not a retry, so attempts are not counted
 MAX_ATTEMPTS = 9  # as for continuing: keeps the "-r<n>" names one digit
 MAX_REASONS = 12
 REASON_CHARS = 600
@@ -77,6 +78,12 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _clip_end(text: str, limit: int) -> str:
+    """The last ``limit`` characters: pytest prints what failed at the end."""
+    text = text.strip()
+    return text if len(text) <= limit else "…" + text[-(limit - 1):].lstrip()
+
+
 def retry_feedback(record: dict[str, Any]) -> str:
     """What the checks found, as text for the next builder. Secrets are masked."""
     attempt = attempt_of(record)
@@ -95,7 +102,7 @@ def retry_feedback(record: dict[str, Any]) -> str:
             lines.append("")
             lines.append(f"The end of the {label} output"
                          + (" (it timed out)" if check.get("timed_out") else "") + ":")
-            lines.append(_clip(tail, OUTPUT_CHARS) if tail else "(no output)")
+            lines.append(_clip_end(tail, OUTPUT_CHARS) if tail else "(no output)")
     lines.append("")
     lines.append("This is a new attempt on a clean checkout: the earlier attempt's changes are "
                  "not here. Make the change again, and make sure these problems do not occur.")

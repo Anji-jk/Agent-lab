@@ -21,6 +21,7 @@ Safety:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -44,6 +45,8 @@ from orchestrator.records.task_events import task_events_path
 from orchestrator.planning.plan_file import PLAN_FILE_NAME, load_task_plan, plan_path
 from orchestrator.records.task_registry import ACTIVE_STATUSES, list_tasks, load_task, validate_task_id
 
+LOG = logging.getLogger(__name__)
+
 DEFAULT_PORT = 8765
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -54,7 +57,7 @@ STATIC_FILES = {
 }
 TABS = (*ROLE_NAMES, "orchestrator")
 MAX_RUNS_LISTED = 100
-COMMAND_LINE_SECONDS = 5.0  # how long a process check is reused (M5.0)
+COMMAND_LINE_SECONDS = 5.0  # how long a process check is reused
 
 # What each agent waits for, shown on a tab that has not started yet.
 WAITS_FOR = {
@@ -91,7 +94,7 @@ def _agent_dict(view: progress.AgentView) -> dict[str, Any]:
         "cost_usd": view.cost_usd,
         "stale": view.stale,
         "from_record": view.from_record,
-        "kept_from": view.kept_from,  # M7.8: finished in this earlier attempt, result kept
+        "kept_from": view.kept_from,  # finished in this earlier attempt, result kept
     }
 
 
@@ -108,7 +111,7 @@ class DashboardData:
         self._lines: dict[int, tuple[float, str | None]] = {}
         self._lines_lock = threading.Lock()
 
-    # -- is a task's process still running? (M5.0) --
+    # -- is a task's process still running? --
     def _command_line(self, pid: int) -> str | None:
         """A process's command line, remembered for a few seconds.
 
@@ -132,7 +135,7 @@ class DashboardData:
         """For a task whose record is at a stage: is its process still this task's?
 
         The record alone cannot say: a process killed by Ctrl+C, a closed window
-        or a sleeping laptop leaves it at its stage. Plan progress (M4.1) asks
+        or a sleeping laptop leaves it at its stage. Plan progress asks
         the same question for status.
         """
         # Imported here: plan progress imports execution modules that import monitoring.
@@ -164,8 +167,9 @@ class DashboardData:
                     try:
                         issue = load_task_plan(self.plans_dir, run_id)["issue"]
                         entry["title"], entry["issue"] = issue.get("title", ""), issue.get("number")
-                    except Exception:
-                        pass
+                    except Exception as exc:  # one unreadable plan must not hide the other runs
+                        LOG.warning("run %s: its plan could not be read (%s: %s)",
+                                    run_id, type(exc).__name__, exc)
         runs = sorted(found.values(), key=lambda r: r["modified"], reverse=True)[:MAX_RUNS_LISTED]
         for entry in runs:
             entry["modified"] = datetime.fromtimestamp(entry["modified"], timezone.utc).isoformat()
@@ -177,7 +181,9 @@ class DashboardData:
             return None
         try:
             return load_task_plan(self.plans_dir, run_id)
-        except Exception:
+        except Exception as exc:  # the page still shows the run's records without its plan
+            LOG.warning("run %s: its plan could not be read (%s: %s)",
+                        run_id, type(exc).__name__, exc)
             return None
 
     def run(self, run_id: str) -> dict[str, Any]:
@@ -214,7 +220,7 @@ class DashboardData:
             "base_commit": ((plan or {}).get("config") or {}).get("base_commit"),
             "planner": _agent_dict(planner) if planner else None,
             "tasks": tasks,
-            # Several tasks may run at once (M7.3); each finished one is merged (M7.1).
+            # Several tasks may run at once; each finished one is merged.
             "running": [t["id"] for t in tasks if t["status"] in ACTIVE_STATUSES],
             "integration": None if integration is None else {
                 "branch": integration.get("branch"),
@@ -260,7 +266,7 @@ class DashboardData:
                 "purpose": role(name).purpose,
                 "waits_for": WAITS_FOR[name],
             }
-        # Merging (M7.6): the reviewer has finished; the work is going into the run's branch.
+        # Merging: the reviewer has finished; the work is going into the run's branch.
         merging = bool(record and record.get("merging") and status in ACTIVE_STATUSES)
         active = (progress.STAGE_ROLE.get(status) if status in ACTIVE_STATUSES and not merging
                   else None)
@@ -306,7 +312,7 @@ class DashboardData:
             if tab == "orchestrator":
                 return task_events_path(self.runs_dir, run_id, task_id), "orchestrator"
             if tab in ROLE_NAMES:
-                try:  # a kept agent's events are in the attempt it ran in (M7.8)
+                try:  # a kept agent's events are in the attempt it ran in
                     attempt = progress.agent_attempt(run_id, task_id, tab,
                                                      load_task(self.runs_dir, run_id, task_id),
                                                      self.runner_script)

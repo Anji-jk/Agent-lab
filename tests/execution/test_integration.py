@@ -1,4 +1,4 @@
-"""M7.1: every finished task is merged into the run's own branch."""
+"""Every finished task is merged into the run's own branch."""
 
 import json
 import sys

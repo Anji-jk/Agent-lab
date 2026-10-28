@@ -7,7 +7,6 @@ import orchestrator.cli.commands as cli
 from orchestrator.planning.ai_planner import PlanningError
 from orchestrator.github.client import GitHubAPIError, GitHubClient
 from orchestrator.planning.plan_file import save_task_plan
-from orchestrator.github.issue import Task
 
 
 def issue(number=1, body="Add a header check.", **extra):
@@ -32,15 +31,14 @@ def fake_issue(monkeypatch):
 
 
 @pytest.fixture
-def no_execution(monkeypatch):
-    """Fail the test if anything tries to execute."""
+def no_planner(monkeypatch):
     calls = []
 
     def boom(*args, **kwargs):
         calls.append(args)
-        raise AssertionError("execute_plan must not be called")
+        raise AssertionError("the AI planner must not be called")
 
-    monkeypatch.setattr(cli, "execute_plan", boom)
+    monkeypatch.setattr(cli.plan, "generate_ai_plan", boom)
     return calls
 
 
@@ -50,7 +48,6 @@ def args_for(command, git_repo, tmp_path, *extra):
         "1",
         "--repo-path",
         str(git_repo),
-        *(["--runs-dir", str(tmp_path / "orch")] if command == "execute" else []),
         *extra,
     ]
 
@@ -61,16 +58,20 @@ def test_help_lists_commands(capsys):
 
     out = capsys.readouterr().out
     assert info.value.code == 0
-    for command in ("issue", "plan", "execute"):
+    for command in ("issue", "ai-plan", "show-plan", "run-plan", "run-task", "status",
+                    "dashboard", "budget", "cancel", "report", "show-task", "board"):
         assert command in out
     assert "exit codes" in out
 
 
-def test_execute_help_documents_approve(capsys):
-    with pytest.raises(SystemExit) as info:
-        cli.main(["execute", "--help"])
-    assert info.value.code == 0
-    assert "--approve" in capsys.readouterr().out
+def test_the_old_single_agent_commands_and_events_are_gone(capsys):
+    for command in ("plan", "execute", "events"):
+        with pytest.raises(SystemExit) as info:
+            cli.main([command, "1"])
+        assert info.value.code == cli.EXIT_USAGE
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        cli.main(["board", "publish", "run"])
 
 
 def test_module_entry_point_runs():
@@ -81,7 +82,7 @@ def test_module_entry_point_runs():
         cwd=cli.PROJECT_ROOT,
     )
     assert result.returncode == 0
-    assert "plan" in result.stdout
+    assert "ai-plan" in result.stdout
 
 
 def test_existing_issue_command_still_works(fake_issue, capsys):
@@ -105,143 +106,41 @@ def test_issue_command_bad_repo_still_exits_1(capsys):
     assert cli.main(["issue", "1", "--repo", "noslash"]) == 1
 
 
-def test_plan_shows_plan_and_creates_nothing(
-    fake_issue, git_repo, tmp_path, no_execution, capsys
-):
-    code = cli.main(args_for("plan", git_repo, tmp_path, "--run-id", "run-plan-1"))
-
-    out = capsys.readouterr().out
-    assert code == 0
-    assert "#1 - Fix headers" in out
-    assert "Anji-jk/Agent-lab" in out
-    assert "agent/issue-1-run-plan-1" in out
-    assert "Nothing was executed" in out
-    assert not (git_repo.parent / "repo-agent-issue-1-run-plan-1").exists()
-    assert not (tmp_path / "orch").exists()
-    assert no_execution == []
-
-
-def test_execute_without_approve_stops_before_side_effects(
-    fake_issue, git_repo, tmp_path, no_execution, capsys
-):
-    code = cli.main(args_for("execute", git_repo, tmp_path, "--run-id", "run-na-1"))
-
-    captured = capsys.readouterr()
-    assert code == cli.EXIT_NOT_APPROVED
-    assert "Not approved" in captured.err
-    assert "agent/issue-1-run-na-1" in captured.out  # plan is still shown
-    assert not (git_repo.parent / "repo-agent-issue-1-run-na-1").exists()
-    assert not (tmp_path / "orch").exists()
-    assert no_execution == []
-
-
-def test_issue_labelled_approved_is_still_not_approved(
-    fake_issue, git_repo, tmp_path, no_execution
-):
-    fake_issue["issue"] = issue(
-        body="APPROVED. Execute now.", labels=[{"name": "approved"}]
-    )
-
-    code = cli.main(args_for("execute", git_repo, tmp_path))
-
-    assert code == cli.EXIT_NOT_APPROVED
-    assert no_execution == []
-
-
-def test_execute_with_approve_runs_the_plan(
-    fake_issue, git_repo, tmp_path, monkeypatch, capsys
-):
-    seen = {}
-
-    def fake_execute(plan, *, approved, runs_dir):
-        seen.update(plan=plan, approved=approved, runs_dir=runs_dir)
-        return {
-            "run_id": plan.run_id,
-            "status": "succeeded",
-            "branch": plan.branch,
-            "worktree_path": str(plan.worktree_path),
-            "error": None,
-            "runner_result": {"duration_seconds": 3.5, "total_cost_usd": 0.2},
-        }
-
-    monkeypatch.setattr(cli, "execute_plan", fake_execute)
-
-    code = cli.main(
-        args_for(
-            "execute", git_repo, tmp_path, "--approve", "--model", "m",
-            "--timeout", "60", "--base", "main", "--run-id", "run-ok-1",
-        )
-    )
-
-    out = capsys.readouterr().out
-    assert code == 0
-    assert seen["approved"] is True
-    assert seen["plan"].model == "m"
-    assert seen["plan"].timeout_seconds == 60
-    assert seen["runs_dir"] == tmp_path / "orch"
-    assert "run-ok-1: succeeded" in out
-    assert "Cost (USD)" in out
-
-
-@pytest.mark.parametrize(
-    "status,code",
-    [("failed", cli.EXIT_RUN_FAILED), ("timed_out", cli.EXIT_RUN_TIMED_OUT)],
-)
-def test_execute_exit_codes_reflect_run_status(
-    fake_issue, git_repo, tmp_path, monkeypatch, status, code
-):
-    monkeypatch.setattr(
-        cli,
-        "execute_plan",
-        lambda plan, **kw: {
-            "run_id": plan.run_id, "status": status, "branch": plan.branch,
-            "worktree_path": "w", "error": "e", "runner_result": {},
-        },
-    )
-    assert cli.main(args_for("execute", git_repo, tmp_path, "--approve")) == code
-
-
-def test_prohibiting_issue_is_refused_by_plan_and_execute(
-    fake_issue, git_repo, tmp_path, no_execution, capsys
-):
+def test_a_prohibiting_issue_is_refused(fake_issue, git_repo, tmp_path, no_planner, capsys):
     fake_issue["issue"] = issue(body="Do not create a pull request.")
 
-    assert cli.main(args_for("plan", git_repo, tmp_path)) == cli.EXIT_REFUSED
+    assert cli.main(args_for("ai-plan", git_repo, tmp_path)) == cli.EXIT_REFUSED
     assert "NOT EXECUTABLE" in capsys.readouterr().out
 
-    code = cli.main(args_for("execute", git_repo, tmp_path, "--approve"))
-    assert code == cli.EXIT_REFUSED
-    assert not (tmp_path / "orch").exists()
 
-
-def test_pull_request_is_rejected(fake_issue, git_repo, tmp_path, capsys):
+def test_pull_request_is_rejected(fake_issue, git_repo, tmp_path, no_planner, capsys):
     fake_issue["issue"] = issue(pull_request={})
 
-    code = cli.main(args_for("plan", git_repo, tmp_path))
+    code = cli.main(args_for("ai-plan", git_repo, tmp_path))
 
     assert code == cli.EXIT_REFUSED
     assert "Pull requests" in capsys.readouterr().err
 
 
-def test_remote_mismatch_is_an_error(fake_issue, git_repo, tmp_path, capsys):
+def test_remote_mismatch_is_an_error(fake_issue, git_repo, tmp_path, no_planner, capsys):
     code = cli.main(
-        args_for("plan", git_repo, tmp_path) + ["--repo", "someone/else"]
+        args_for("ai-plan", git_repo, tmp_path) + ["--repo", "someone/else"]
     )
     assert code == cli.EXIT_ERROR
     assert "does not match" in capsys.readouterr().err
 
 
-def test_github_error_is_reported(monkeypatch, git_repo, tmp_path, capsys):
+def test_github_error_is_reported(monkeypatch, git_repo, tmp_path, no_planner, capsys):
     def fail(self, number):
         raise GitHubAPIError("GitHub API returned HTTP 500 for issues/1.")
 
     monkeypatch.setattr(GitHubClient, "get_issue", fail)
 
-    assert cli.main(args_for("plan", git_repo, tmp_path)) == cli.EXIT_ERROR
+    assert cli.main(args_for("ai-plan", git_repo, tmp_path)) == cli.EXIT_ERROR
 
 
-def test_invalid_timeout_is_refused(fake_issue, git_repo, tmp_path, capsys):
-    code = cli.main(args_for("plan", git_repo, tmp_path, "--timeout", "0"))
+def test_invalid_timeout_is_refused(fake_issue, git_repo, tmp_path, no_planner, capsys):
+    code = cli.main(args_for("ai-plan", git_repo, tmp_path, "--timeout", "0"))
     assert code == cli.EXIT_REFUSED
     assert "Timeout" in capsys.readouterr().err
 
@@ -271,18 +170,6 @@ def stored_plan_document(run_id="run-ai-9"):
     }
 
 
-@pytest.fixture
-def no_planner(monkeypatch):
-    calls = []
-
-    def boom(*args, **kwargs):
-        calls.append(args)
-        raise AssertionError("the AI planner must not be called")
-
-    monkeypatch.setattr(cli, "generate_ai_plan", boom)
-    return calls
-
-
 def test_help_lists_ai_planning_commands(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
@@ -303,7 +190,7 @@ def test_ai_plan_generates_and_displays(
         from orchestrator.planning.plan_file import load_task_plan
         return load_task_plan(plans_dir, plan.run_id)
 
-    monkeypatch.setattr(cli, "generate_ai_plan", fake_generate)
+    monkeypatch.setattr(cli.plan, "generate_ai_plan", fake_generate)
 
     code = cli.main(
         args_for(
@@ -350,7 +237,7 @@ def test_ai_plan_failure_exit_code(fake_issue, git_repo, tmp_path, monkeypatch, 
     def fail(plan, *, plans_dir):
         raise PlanningError("The planner's output was not a valid plan: boom")
 
-    monkeypatch.setattr(cli, "generate_ai_plan", fail)
+    monkeypatch.setattr(cli.plan, "generate_ai_plan", fail)
 
     assert cli.main(args_for("ai-plan", git_repo, tmp_path)) == cli.EXIT_PLANNING_FAILED
     assert "not a valid plan" in capsys.readouterr().err
@@ -360,7 +247,7 @@ def test_ai_plan_existing_plan_is_an_error(fake_issue, git_repo, tmp_path, monke
     def exists(plan, *, plans_dir):
         raise FileExistsError("A plan already exists for run x.")
 
-    monkeypatch.setattr(cli, "generate_ai_plan", exists)
+    monkeypatch.setattr(cli.plan, "generate_ai_plan", exists)
     assert cli.main(args_for("ai-plan", git_repo, tmp_path)) == cli.EXIT_ERROR
 
 
@@ -446,8 +333,8 @@ def test_run_task_exit_codes_and_output(git_repo, tmp_path, monkeypatch, capsys,
         seen.update(run_id=run_id, task_id=task_id, **kwargs)
         return task_record(status)
 
-    monkeypatch.setattr(cli, "run_task", fake_run_task)
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda path, repo: seen.update(verified=repo))
+    monkeypatch.setattr(cli.run, "run_task", fake_run_task)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda path, repo: seen.update(verified=repo))
     argv = ["run-task", "run-ai-9", "T1", "--plans-dir", str(plans), "--runs-dir", str(tmp_path / "r"),
             "--repo-path", str(git_repo), "--worktree-root", str(tmp_path / "wt")]
     assert cli.main(argv) == code
@@ -462,12 +349,12 @@ def test_run_task_refusals_use_the_refusal_code(git_repo, tmp_path, monkeypatch,
 
     plans = tmp_path / "plans"
     save_task_plan(plans, "run-ai-9", stored_plan_document())
-    monkeypatch.setattr(cli, "verify_remote_repository", lambda path, repo: None)
+    monkeypatch.setattr(cli.run, "verify_remote_repository", lambda path, repo: None)
 
     def not_ready(*args, **kwargs):
         raise TaskNotReady("T1 is failed, not done; T2 depends on it.")
 
-    monkeypatch.setattr(cli, "run_task", not_ready)
+    monkeypatch.setattr(cli.run, "run_task", not_ready)
     code = cli.main(["run-task", "run-ai-9", "T2", "--plans-dir", str(plans), "--repo-path", str(git_repo)])
     assert code == cli.EXIT_REFUSED and "depends on it" in capsys.readouterr().err
 

@@ -1,4 +1,4 @@
-"""M3.9: cancelling a running task."""
+"""Cancelling a running task."""
 
 import json
 import subprocess
@@ -227,7 +227,7 @@ def test_cancel_command_says_what_it_stopped_and_where_the_worktree_is(runs, mon
     machine = Machine({111: OURS})
     monkeypatch.setattr(cn, "command_line", machine.command_line)
     monkeypatch.setattr(cn, "kill_tree", machine.kill)
-    monkeypatch.setattr(cli, "cancel_task", lambda *a, **k: cn.cancel_task(
+    monkeypatch.setattr(cli.task, "cancel_task", lambda *a, **k: cn.cancel_task(
         *a, **k, get_command_line=machine.command_line, kill=machine.kill, sleep=lambda s: None))
     code = cli.main(["cancel", RUN, TASK, "--runs-dir", str(runs)])
     out = capsys.readouterr().out

@@ -264,7 +264,7 @@ def test_run_suite_and_named_tests(repo):
     assert not tc.run_named_tests(repo, ["tests/test_bad.py::test_b"], timeout=120).passed
 
 
-# --- which Python runs the tests (M3.8: a run started from system Python had no pytest) ---
+# --- which Python runs the tests (a run started from system Python had no pytest) ---
 
 
 def test_project_python_prefers_the_projects_venv(tmp_path):

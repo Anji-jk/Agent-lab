@@ -1,4 +1,4 @@
-"""Shared fakes for the board tests (M5.2, M5.3): a stored plan, a connected board,
+"""Shared fakes for the board tests: a stored plan, a connected board,
 and stand-ins for the Issue and board clients that record every call.
 
 A file of its own, with a unique name: the test folders have no __init__.py.

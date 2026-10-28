@@ -1,4 +1,4 @@
-"""Read a GitHub Project (the board) through GitHub's REST API (M5.1).
+"""Read a GitHub Project (the board) through GitHub's REST API.
 
 GitHub added REST endpoints for Projects in September 2025, so the board needs
 no GraphQL and no new library: the same standard-library requests as the
@@ -21,7 +21,6 @@ It reads (5.1), adds Issues to the board (5.2) and moves cards between columns (
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,8 +29,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from orchestrator.github.client import GitHubAPIError
+from orchestrator.settings import PROJECT_TOKEN, load_settings
 
-PROJECT_TOKEN_VARIABLE = "AGENT_LAB_PROJECT_TOKEN"
+PROJECT_TOKEN_VARIABLE = PROJECT_TOKEN
 API = "https://api.github.com"
 MAX_PAGES = 20
 
@@ -40,11 +40,7 @@ Opener = Callable[..., Any]  # urllib.request.urlopen, or a fake in tests
 
 def project_token() -> tuple[str | None, str]:
     """(token, the variable it came from) for the board."""
-    for name in (PROJECT_TOKEN_VARIABLE, "GITHUB_TOKEN"):
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value, name
-    return None, PROJECT_TOKEN_VARIABLE
+    return load_settings().board_token()
 
 
 class ProjectAPIError(GitHubAPIError):
@@ -140,7 +136,7 @@ class ProjectClient:
         return f"GitHub returned HTTP {code} for {where}."
 
     def _send(self, method: str, path: str, payload: dict[str, Any]) -> Any:
-        """A write to the board (M5.2 on). Needs the classic token's 'project' scope."""
+        """A write to the board Needs the classic token's 'project' scope."""
         if not self.token:
             raise GitHubAPIError(self._explain(401))
         request = urllib.request.Request(
@@ -193,7 +189,7 @@ class ProjectClient:
         return item["id"]
 
     def set_field(self, item_id: int, field_id: int, option_id: str) -> None:
-        """Set a single-select field (the Status column) of a card to one of its options (M5.3)."""
+        """Set a single-select field (the Status column) of a card to one of its options."""
         self._send("PATCH", f"/items/{item_id}", {"fields": [{"id": field_id, "value": option_id}]})
 
     def project(self) -> Response:

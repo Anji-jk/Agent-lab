@@ -1,4 +1,4 @@
-"""M7.8: a continued task shows the agents it kept from the stopped attempt as finished."""
+"""A continued task shows the agents it kept from the stopped attempt as finished."""
 
 from datetime import datetime, timezone
 

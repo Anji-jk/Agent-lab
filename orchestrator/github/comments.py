@@ -1,10 +1,10 @@
-"""What the comments on the task Issues and the parent Issue say (M5.4).
+"""What the comments on the task Issues and the parent Issue say.
 
 A task's Issue gets one comment each time one of its attempts ends (done,
 failed, needs review, cancelled): which attempt it was, what it cost and how
 long it took, what each agent did, what the tests showed, and what the tester
 and reviewer concluded; why it did not pass; for a done task, its commit. The
-parent Issue gets the run report (M4.8) when the plan completes or stops.
+parent Issue gets the run report when the plan completes or stops.
 
 Everything here is read from the records; secrets are masked, and long notes
 are cut. A hidden key at the end of each comment names what it is about, and the
@@ -16,12 +16,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from orchestrator.execution.roles import ROLE_NAMES
-from orchestrator.monitoring.event_feed import mask_secrets
-from orchestrator.monitoring.progress import attempt_of
+from orchestrator.core.attempts import attempt_of
+from orchestrator.core.roles import ROLE_NAMES
+from orchestrator.core.secrets import mask_secrets
 
 if TYPE_CHECKING:
-    from orchestrator.scheduling.left_behind import LeftBehind
+    from orchestrator.execution.left_behind import LeftBehind
 
 FINAL_STATUSES = ("done", "failed", "needs_review", "cancelled")
 STATUS_WORDS = {"done": "done", "failed": "failed", "needs_review": "needs review",
@@ -143,7 +143,7 @@ def task_comment(run_id: str, task_id: str, record: dict[str, Any],
                  left: LeftBehind | None = None) -> str:
     """The comment for the attempt that just ended.
 
-    ``left``: for a cancelled attempt, what it had done up to the stop (M5.5).
+    ``left``: for a cancelled attempt, what it had done up to the stop.
     """
     status = str(record.get("status"))
     cost = record.get("cost_usd")

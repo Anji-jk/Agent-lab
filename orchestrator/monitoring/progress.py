@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.execution import runner_adapter
-from orchestrator.execution.roles import ROLE_NAMES
+from orchestrator.core import runner_paths
+from orchestrator.core.attempts import agent_run_id, attempt_of  # noqa: F401
+from orchestrator.core.roles import ROLE_NAMES
 from orchestrator.records.task_registry import list_tasks
 
 PROGRESS_FILE_NAME = "progress.json"
@@ -37,24 +38,8 @@ def read_progress(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def agent_run_id(run_id: str, task_id: str, role: str, attempt: int = 1) -> str:
-    """The runner's ID for one agent of a task; ``task_runner`` names them this way.
-
-    A retry (M4.4) is attempt 2 and gets its own IDs, so the first attempt's files stay.
-    """
-    if attempt <= 1:
-        return f"{run_id}-{task_id}-{role}"
-    return f"{run_id}-{task_id}-r{attempt}-{role}"
-
-
-def attempt_of(record: dict[str, Any] | None) -> int:
-    """Which attempt a task record is: 1 unless it says otherwise (older records say nothing)."""
-    value = (record or {}).get("attempt")
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else 1
-
-
-def progress_path(run_id: str, runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT) -> Path:
-    return runner_adapter.runner_run_directory(run_id, runner_script) / PROGRESS_FILE_NAME
+def progress_path(run_id: str, runner_script: Path = runner_paths.DEFAULT_RUNNER_SCRIPT) -> Path:
+    return runner_paths.runner_run_directory(run_id, runner_script) / PROGRESS_FILE_NAME
 
 
 def _seconds_since(stamp: object, now: datetime) -> float | None:
@@ -85,7 +70,7 @@ class AgentView:
     cost_usd: float | None
     status: str | None  # the runner's final status, once finished
     from_record: bool = False  # no progress file: taken from the task record's summary
-    kept_from: int | None = None  # M7.8: its result was kept from this earlier, stopped attempt
+    kept_from: int | None = None  # its result was kept from this earlier, stopped attempt
 
     @property
     def stale(self) -> bool:
@@ -165,7 +150,7 @@ def agent_view_from_record(role: str, summary: object) -> AgentView | None:
 
 
 def _kept(record: dict[str, Any], role: str) -> dict[str, Any] | None:
-    """The role's result that a continued attempt kept from a stopped one (M4.5), if any."""
+    """The role's result that a continued attempt kept from a stopped one, if any."""
     kept = record.get("reused_agents")
     summary = kept.get(role) if isinstance(kept, dict) else None
     return summary if isinstance(summary, dict) else None
@@ -175,7 +160,7 @@ def kept_attempt(run_id: str, task_id: str, role: str, record: dict[str, Any],
                  runner_script: Path) -> int | None:
     """Which earlier attempt the kept agent ran in, or None when this attempt runs its own.
 
-    The record says so since M7.8; for an older record, the latest earlier attempt that left
+    A newer record says so; for an older record, the latest earlier attempt that left
     this agent's progress file is taken.
     """
     current = attempt_of(record)
@@ -205,7 +190,7 @@ def task_agent_view(run_id: str, task_id: str, role: str, record: dict[str, Any]
     """Live progress if the runner left a file, else the record's summary, else not started.
 
     A continued task keeps the results of agents that finished before it stopped; those
-    show as finished in the attempt they ran in, not as "not started" (M7.8).
+    show as finished in the attempt they ran in, not as "not started".
     """
     progress = read_progress(progress_path(agent_run_id(run_id, task_id, role, attempt_of(record)), runner_script))
     if progress is not None:
@@ -247,7 +232,7 @@ def run_status(
     runs_dir: Path,
     run_id: str,
     *,
-    runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
+    runner_script: Path = runner_paths.DEFAULT_RUNNER_SCRIPT,
     now: datetime | None = None,
 ) -> list[TaskView]:
     """Every task of a run with each of its agents, read from disk only."""
@@ -264,7 +249,7 @@ def run_status(
 def planner_view(
     run_id: str,
     *,
-    runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
+    runner_script: Path = runner_paths.DEFAULT_RUNNER_SCRIPT,
     now: datetime | None = None,
 ) -> AgentView | None:
     """The planner's progress for a run, if it left a progress file."""

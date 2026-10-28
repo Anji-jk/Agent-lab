@@ -1,4 +1,4 @@
-"""The run's integration branch: every finished task is merged into it (M7.1).
+"""The run's integration branch: every finished task is merged into it.
 
 Each task works on its own branch in its own worktree. As a task's last step,
 once every check has passed and its work is committed, that commit is merged
@@ -13,7 +13,7 @@ The merge is one of two kinds:
   task's own checks passed, so nothing is run again. One task at a time, every
   merge is of this kind.
 * **A real merge**: another task was merged since this one started (tasks run
-  side by side, M7.3). The two changes may each pass alone and fail together,
+  side by side). The two changes may each pass alone and fail together,
   so the full test suite runs on the merged result before the branch keeps it.
 
 A conflict, or a merged result whose suite fails, leaves the branch as it was
@@ -70,7 +70,7 @@ def integration_path(runs_dir: Path, run_id: str) -> Path:
 
 
 def load_integration(runs_dir: Path, run_id: str) -> dict[str, Any] | None:
-    """The run's branch record, or None before the first merge (or for a run from before M7.1)."""
+    """The run's branch record, or None before the first merge (or for a run from before runs had a branch)."""
     try:
         data = json.loads(integration_path(runs_dir, run_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -169,24 +169,15 @@ def merge_task(
                     f"{task_id}'s work conflicts with work merged into the run's branch since "
                     f"it started ({files}). The branch was left as it was.",
                     "conflict", {"files": conflicted, "branch_head": before}) from None
-            # Everything on the run's branch since it was made: this task's work and the
-            # work merged before it. The orchestrator's tests run only if any of it touched them.
-            touched = [p for p in _git(worktree, "diff", "--name-only", str(data["base_commit"]),
-                                       "HEAD").splitlines() if p.strip()]
-            result = tc.run_suite(worktree, command=test_command, timeout=test_timeout, env=env,
-                                  touched=touched)
+            result = tc.run_suite(worktree, command=test_command, timeout=test_timeout, env=env)
             suite = result.summary()
             if not result.passed:
                 _git(worktree, "reset", "--hard", before)
                 what = (f"did not finish within {test_timeout} s" if result.timed_out
                         else "fails")
-                which = "the full test suite"
-                if result.scope == "project":
-                    which = "the project's tests"
-                    what = "fail" if what == "fails" else what
                 raise MergeProblem(
                     f"{task_id}'s work passes on its own, but merged with the work already on "
-                    f"the run's branch {which} {what}. The branch was left as it "
+                    f"the run's branch the full test suite {what}. The branch was left as it "
                     "was.", "suite", {"suite": suite, "branch_head": before})
         head = tc.head_commit(worktree)
         data["head"] = head
@@ -197,7 +188,7 @@ def merge_task(
         return Merged(branch, kind, head, suite)
 
 
-# --- showing it (M7.6) -----------------------------------------------------------------------
+# --- showing it -----------------------------------------------------------------------
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -208,11 +199,6 @@ def _took(seconds: Any) -> str:
     if not isinstance(seconds, (int, float)):
         return ""
     return f" in {seconds:.0f} s" if seconds < 90 else f" in {round(seconds / 60)} min"
-
-
-def _suite_words(suite: dict[str, Any]) -> str:
-    """M7.8: a suite may cover the project's tests only."""
-    return "the project's tests" if suite.get("scope") == "project" else "the full suite"
 
 
 def describe_merge(merge: Any) -> str | None:
@@ -226,8 +212,7 @@ def describe_merge(merge: Any) -> str | None:
     if problem == "suite":
         suite = _as_dict(merge.get("suite"))
         what = "did not finish" if suite.get("timed_out") else "failed"
-        return (f"not merged: {_suite_words(suite)} {what} on the merged result"
-                f"{_took(suite.get('seconds'))}")
+        return f"not merged: the full suite {what} on the merged result{_took(suite.get('seconds'))}"
     if problem:
         return "not merged: the merge itself failed"
     kind = merge.get("kind")
@@ -235,8 +220,7 @@ def describe_merge(merge: Any) -> str | None:
         return "merged: fast-forward (nothing else was merged since it started, so no new suite run)"
     if kind == "merge":
         suite = _as_dict(merge.get("suite"))
-        return (f"merged: real merge, {_suite_words(suite)} passed on the merged result"
-                f"{_took(suite.get('seconds'))}")
+        return f"merged: real merge, the full suite passed on the merged result{_took(suite.get('seconds'))}"
     if kind == "already":
         return "merged: its commit was already on the run's branch"
     return None

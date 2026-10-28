@@ -7,3 +7,5 @@ __pycache__/
 *.py[cod]
 agent-logs/
 runs/
+*.egg-info/
+

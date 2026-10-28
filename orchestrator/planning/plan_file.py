@@ -13,6 +13,7 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from orchestrator.records.task_registry import TASK_ID_PATTERN  # noqa: F401
 from orchestrator.records.run_registry import (
     RunRegistryError,
     run_directory,
@@ -24,7 +25,6 @@ SCHEMA_VERSION = 2
 COMPLEXITIES = ("small", "medium", "large")
 PLAN_FILE_NAME = "plan.json"
 
-TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 MAX_TASKS = 30
 MAX_TITLE = 200
 MAX_TEXT = 4000

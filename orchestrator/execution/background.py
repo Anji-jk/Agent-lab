@@ -1,4 +1,4 @@
-"""Start a task's pipeline as its own process, so the terminal is free (M3.8).
+"""Start a task's pipeline as its own process, so the terminal is free.
 
 ``run-task --background`` checks here what it can check at once (the plan, its
 dependencies, that the task has not run before), then starts the same
@@ -31,23 +31,15 @@ from orchestrator.execution.checks import project_python
 from orchestrator.execution.runner_adapter import PROJECT_ROOT
 from orchestrator.execution.task_runner import prepare
 from orchestrator.records.run_registry import RunRegistryError, utc_now, write_json_atomic
-from orchestrator.records.task_registry import load_task, task_directory
+from orchestrator.records.task_registry import (  # noqa: F401
+    LAUNCH_FILE_NAME, LOG_FILE_NAME, launch_path, load_task, log_path,
+)
 
-LOG_FILE_NAME = "run-task.log"
-LAUNCH_FILE_NAME = "launch.json"
 STARTUP_WAIT_SECONDS = 20.0
 POLL_SECONDS = 0.25
 LOG_TAIL_LINES = 20
 
 Popen = Callable[[list[str], Path, Path], Any]
-
-
-def log_path(runs_dir: Path, run_id: str, task_id: str) -> Path:
-    return task_directory(runs_dir, run_id, task_id) / LOG_FILE_NAME
-
-
-def launch_path(runs_dir: Path, run_id: str, task_id: str) -> Path:
-    return task_directory(runs_dir, run_id, task_id) / LAUNCH_FILE_NAME
 
 
 def detached_options() -> dict[str, Any]:

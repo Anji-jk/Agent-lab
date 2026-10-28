@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orchestrator.legacy.planning import ExecutionPlan
+from orchestrator.planning.plan import ExecutionPlan
 from orchestrator.planning.profiles import profile_for
 
 
@@ -126,9 +126,7 @@ def display_task(record: dict) -> None:
         check = (record.get("checks") or {}).get(key)
         if check:
             verdict = "passed" if check["exit_code"] == 0 and not check["timed_out"] else "FAILED"
-            which = {"project": ", the project's tests only",
-                     "whole": ", orchestrator tests included"}.get(str(check.get("scope")), "")
-            print(f"{label + ':':<13}{verdict} (exit {check['exit_code']}, {check['seconds']}s{which})")
+            print(f"{label + ':':<13}{verdict} (exit {check['exit_code']}, {check['seconds']}s)")
     if record.get("reasons"):
         print("Because:")
         for reason in record["reasons"]:
@@ -140,21 +138,3 @@ def display_task(record: dict) -> None:
             for note in findings[key]:
                 print(f"  - {note}")
     print("History:     " + " -> ".join(step["status"] for step in record.get("history", [])))
-
-
-def event_lines(item: dict, details: bool) -> list[str]:
-    at = item.get("at")
-    clock = at[11:19] if isinstance(at, str) and len(at) >= 19 else "--:--:--"
-    kind = item.get("tool") if item.get("kind") == "tool" else item.get("kind")
-    lines = [f"{clock}  {str(kind):<9} {item.get('title', '')}"]
-    result = item.get("result")
-    if result:
-        lines.append(f"{'':10}└ {result['status']:<7} {result.get('summary', '')}")
-    elif item.get("pending"):
-        lines.append(f"{'':10}└ waiting...")
-    if details:
-        for label, text in (("input", item.get("detail")), ("result", (result or {}).get("detail"))):
-            if text:
-                lines.append(f"{'':12}{label}:")
-                lines.extend(f"{'':14}{line}" for line in str(text).splitlines())
-    return lines

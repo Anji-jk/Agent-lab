@@ -1,4 +1,4 @@
-"""Shared helpers for the run-plan and run report tests (M4.7, M4.8).
+"""Shared helpers for the run-plan and run report tests.
 
 A file of its own, with a unique name, for the same reason as
 tests/execution/task_runner_support.py: the test folders have no __init__.py.

@@ -1,4 +1,4 @@
-"""M4.7: run-plan works through a plan one task at a time."""
+"""Run-plan works through a plan one task at a time."""
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from orchestrator.execution.cancel import is_plan_process, is_task_process
 from orchestrator.execution.runner_adapter import RunnerOutcome
 from orchestrator.records.task_registry import list_tasks, save_task, update_task
 from orchestrator.scheduling import run_plan as rp
-from run_plan_support import no_process, per_task, stopped, work
+from run_plan_support import per_task, stopped, work
 from task_runner_support import (  # pyright: ignore[reportMissingImports]  (conftest.py puts it on the path)
     RUN_ID,
     Stop,

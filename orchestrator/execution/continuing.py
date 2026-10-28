@@ -1,4 +1,4 @@
-"""Continue a stopped task from the stage it reached (M4.5).
+"""Continue a stopped task from the stage it reached.
 
 A task that stopped part-way (cancelled, or its process killed by a closed
 window, a crash or a reboot) still has its worktree, with every file its
@@ -10,13 +10,13 @@ starting at the stage it had reached, with fresh agents:
   up, not paid for again: stopped while testing, the builder's result is
   kept and a new tester runs; stopped while reviewing, only a new reviewer
   runs. If the files changed after the tests' checkpoint, the tests run again.
-* Stopped by the run budget (M4.6, ``needs_review`` with ``budget_stop``):
+* Stopped by the run budget (``needs_review`` with ``budget_stop``):
   after the budget is raised it goes on at the stage it reached, like a stop.
-* Stopped by Claude's usage limit (M5.5, ``needs_review`` with ``limit_stop``):
+* Stopped by Claude's usage limit (``needs_review`` with ``limit_stop``):
   once the limit has reset, it goes on at the stage it reached. Before the
   reset time it is refused, since the agent would only be refused again.
 * Without a checkpoint (stopped while building, or a record made before
-  M4.5) a new builder starts, told that the worktree already holds the
+  checkpoints existed) a new builder starts, told that the worktree already holds the
   earlier changes, so it can finish them rather than start over.
 
 The agents' conversations are not resumed: after an hour Claude's cache has
@@ -25,7 +25,7 @@ expired, so a resumed conversation would be re-read at full price.
 Like a retry, a continue is a new attempt with its own record and agent
 folders; the stopped attempt's files move to ``attempt-<n>/``. Unlike a retry,
 it keeps the worktree and branch, and it does not count as the task's one
-retry. For a run with its own branch (M7.1) it makes no difference that other tasks
+retry. For a run with its own branch it makes no difference that other tasks
 finished since this one started: it is merged into the branch like any task. Only a run
 from before that, whose tasks form one chain, refuses a task the run has moved on from,
 because its commit would split the chain.
@@ -43,7 +43,9 @@ from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
 from orchestrator.execution.diagnose import when_text
 from orchestrator.execution.retry import archive_attempt, restore_attempt
-from orchestrator.monitoring.progress import attempt_of
+from orchestrator.core.attempts import attempt_of
+from orchestrator.execution.left_behind import left_behind
+from orchestrator.execution.liveness import process_liveness
 from orchestrator.records.task_registry import (
     ACTIVE_STATUSES, TASK_RECORD_NAME, load_task, task_directory,
 )
@@ -155,12 +157,8 @@ def continue_task(
     """Run a stopped task again from the stage it reached; return its new record.
 
     ``worktree_root``: where the run's branch gets its worktree if this task's merge is
-    the run's first (M7.1); the task itself keeps the worktree it already has.
+    the run's first; the task itself keeps the worktree it already has.
     """
-    # Imported here: plan progress imports this package's background module.
-    from orchestrator.scheduling.left_behind import left_behind
-    from orchestrator.scheduling.plan_progress import process_liveness
-
     record = load_task(runs_dir, run_id, task_id)  # RunRegistryError if it never ran
     alive = is_alive or process_liveness(runs_dir, run_id, runner_script=Path(runner_script))
     problem = continue_problem(record, alive)
