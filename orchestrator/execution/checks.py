@@ -426,7 +426,12 @@ def run_command(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        partial = exc.stdout if isinstance(exc.stdout, str) else ""
+        if isinstance(exc.stdout, bytes):
+            partial = exc.stdout.decode("utf-8", errors="replace")
+        elif isinstance(exc.stdout, str):
+            partial = exc.stdout
+        else:
+            partial = ""
         return CommandResult(
             tuple(command), None, True, partial[-OUTPUT_TAIL_CHARS:],
             time.monotonic() - started,
