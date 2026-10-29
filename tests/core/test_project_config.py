@@ -5,7 +5,7 @@ import pytest
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import agents as ta
 from orchestrator.execution import task_runner as tr
-from orchestrator.execution.project_config import (
+from orchestrator.core.project_config import (
     CONFIG_FILE_NAME, DEFAULT_TEST_EXAMPLE, ProjectConfig, load_project_config,
 )
 

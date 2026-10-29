@@ -112,9 +112,9 @@ def test_a_bad_value_is_refused_naming_the_setting(name, value, words):
         st.load_settings({name: value})
 
 
-def test_a_bad_setting_stops_the_command_with_its_name(monkeypatch, capsys):
+def test_a_bad_setting_stops_the_command_with_its_name(monkeypatch, capsys, git_repo):
     monkeypatch.setenv("AGENT_LAB_TEST_TIMEOUT", "soon")
-    assert cli.main(["budget", "r"]) == cli.EXIT_REFUSED
+    assert cli.main(["budget", "r", "--repo-path", str(git_repo)]) == cli.EXIT_REFUSED
     assert "AGENT_LAB_TEST_TIMEOUT" in capsys.readouterr().err
 
 
@@ -125,12 +125,13 @@ def test_no_repository_is_a_clear_error_not_a_hidden_default(monkeypatch, capsys
     assert cli.main(["issue", "1", "--repo", "noslash"]) == cli.EXIT_ERROR
 
 
-def test_the_repository_comes_from_the_setting_when_not_given(monkeypatch):
+def test_the_repository_comes_from_the_setting_when_not_given(monkeypatch, git_repo):
     seen = []
     monkeypatch.setenv("AGENT_LAB_REPOSITORY", "me/mine")
     monkeypatch.setattr(cli.plan, "run_ai_plan", lambda args: seen.append(args.repo) or 0)
-    assert cli.main(["ai-plan", "3"]) == 0 and seen == ["me/mine"]
-    assert cli.main(["ai-plan", "3", "--repo", "x/y"]) == 0 and seen[-1] == "x/y"
+    here = ["--repo-path", str(git_repo)]
+    assert cli.main(["ai-plan", "3", *here]) == 0 and seen == ["me/mine"]
+    assert cli.main(["ai-plan", "3", *here, "--repo", "x/y"]) == 0 and seen[-1] == "x/y"
 
 
 def test_no_hard_coded_repository_remains_in_the_code():
@@ -150,3 +151,52 @@ def test_no_github_token_is_on_the_agents_list():
     from agent_env import build_agent_env  # pyright: ignore[reportMissingImports]
     env = build_agent_env({"GITHUB_TOKEN": FINE, "AGENT_LAB_PROJECT_TOKEN": CLASSIC, "PATH": "/bin"})
     assert env == {"PATH": "/bin"}
+
+
+# --- the project's own settings come before the orchestrator's ---
+
+
+@pytest.fixture
+def project(git_repo, monkeypatch):
+    from orchestrator.core.project import ensure_data_dir, find_project
+    found = find_project(git_repo)
+    ensure_data_dir(found)
+    st.use_project(found)
+    yield found
+    st.use_project(None)
+
+
+def test_the_projects_env_file_wins_over_the_orchestrators(project, tmp_path, monkeypatch):
+    for name in ("AGENT_LAB_REPOSITORY", "GITHUB_TOKEN", "AGENT_LAB_MAX_PARALLEL"):
+        monkeypatch.delenv(name, raising=False)
+    orchestrators = env_file(tmp_path, f"GITHUB_TOKEN={CLASSIC}\nAGENT_LAB_MAX_PARALLEL=2\n")
+    monkeypatch.setenv("AGENT_LAB_ENV_FILE", str(orchestrators))
+    project.env_file.write_text(f"GITHUB_TOKEN={FINE}\n", encoding="utf-8")
+    s = st.load_settings()
+    assert s.github_token == FINE  # the project's own
+    assert s.max_parallel == 2  # not set by the project: the orchestrator's
+
+
+def test_the_shell_still_wins_over_the_projects_env_file(project, monkeypatch):
+    project.env_file.write_text(f"GITHUB_TOKEN={FINE}\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_TOKEN", CLASSIC)
+    assert st.load_settings().github_token == CLASSIC
+
+
+def test_the_projects_repository_comes_from_its_toml_before_the_variable(project, monkeypatch):
+    monkeypatch.setenv("AGENT_LAB_REPOSITORY", "someone/other-project")
+    (project.root / ".agent-lab.toml").write_text('repository = "me/ledger"\n', encoding="utf-8")
+    assert st.load_settings().repository == "me/ledger"
+
+
+def test_without_a_project_only_the_orchestrators_files_are_read(git_repo, monkeypatch):
+    (git_repo / ".agent-lab").mkdir()
+    (git_repo / ".agent-lab" / ".env").write_text(f"GITHUB_TOKEN={FINE}\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert st.active_project() is None and st.load_settings().github_token is None
+
+
+def test_a_command_does_not_leave_its_project_behind(git_repo, monkeypatch):
+    monkeypatch.setattr(cli.plan, "run_show_plan", lambda args: 0)
+    assert cli.main(["show-plan", "r", "--repo-path", str(git_repo)]) == 0
+    assert st.active_project() is None

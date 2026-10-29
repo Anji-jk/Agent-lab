@@ -5,7 +5,9 @@ with a builder, a tester and a reviewer agent in an isolated Git worktree, check
 and merges the finished tasks into one branch per run. Nothing is pushed.
 
 The orchestrator works on **other projects**: each one is its own repository (the first is
-`csv-summary`, next to this one). Agents never work on the orchestrator's own code.
+`csv-summary`, next to this one). Agents never work on the orchestrator's own code, and nothing
+about a project is kept here: its runs, plans, agents' files, board connection and tokens live in
+the project, in `.agent-lab/`.
 
 ## Requirements
 - Python 3.11+
@@ -17,40 +19,75 @@ The orchestrator works on **other projects**: each one is its own repository (th
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-copy .env.example .env     # then fill in the tokens
+python -m pip install -e ".[dev]"   # so `python -m orchestrator` works from a project's folder
+copy .env.example .env               # this machine's settings; tokens shared by every project
 ```
 
 ## Settings
 
-All settings are read in one place, `orchestrator/settings.py`, from the shell or from `.env`
-(the shell wins). `.env.example` lists every name with a comment. A value that is not valid stops
-the command with a message that names it.
+All settings are read in one place, `orchestrator/settings.py`. The first that has a value wins:
+
+1. the shell
+2. the project's `.agent-lab/.env` (its own tokens)
+3. this repository's `.env` (this machine, and tokens every project may share)
+
+`.env.example` lists every name with a comment. A value that is not valid stops the command with a
+message that names it.
 
 | Setting | Meaning |
 | --- | --- |
 | `GITHUB_TOKEN`, `AGENT_LAB_PROJECT_TOKEN` | GitHub tokens (Issues; the Project board) |
-| `AGENT_LAB_REPOSITORY` | `OWNER/REPO` used when a command is not given `--repo` |
+| `AGENT_LAB_REPOSITORY` | fallback `OWNER/REPO`; a project's `.agent-lab.toml` comes first |
 | `AGENT_LAB_MAX_PARALLEL` | how many tasks run together (1 to 8, default 3) |
 | `AGENT_LAB_TEST_TIMEOUT` | seconds a test run may take (60 to 86400) |
 | `AGENT_LAB_PYTHON`, `AGENT_LAB_WORKTREE_ROOT`, `AGENT_LAB_AGENT_RUNS_DIR` | per-machine paths |
 
 Task sizes (model, effort, turns, timeout, spending cap) and each agent's share are in
-`config/profiles.toml`.
+`config/profiles.toml`, the default for every project; a project may change a size in its own
+`.agent-lab.toml`.
 
 ## A project
 
-A project is a repository with a `CLAUDE.md` (rules for the agents) and, optionally, a
-`.agent-lab.toml`:
+A project is a repository with a `CLAUDE.md` (rules for the agents). Run every command **from the
+project's folder** (or give `--repo-path`), with this repository's `.venv` active. `init` sets a
+new project up:
+
+```powershell
+cd ..\ledger-cli
+..\agent-lab\.venv\Scripts\Activate.ps1
+python -m orchestrator init          # .agent-lab/, its .env, and .agent-lab.toml
+notepad .agent-lab\.env              # this project's tokens (optional)
+git add .agent-lab.toml; git commit -m "Agent Lab settings"
+```
+
+What lives where in the project:
+
+| | Committed | What |
+| --- | --- | --- |
+| `.agent-lab.toml` | yes | `repository`, how its tests run, task-size changes |
+| `.agent-lab/.env` | no | its GitHub tokens |
+| `.agent-lab/runs/` | no | plans, task records, events, reports, `board.json` |
+| `.agent-lab/agents/` | no | each agent's prompt, result and transcript |
+
+`.agent-lab/` holds a `.gitignore` of `*`, so Git ignores all of it and the checkout stays clean.
+Read-only agents (the planner runs in the checkout) may not read it.
 
 ```toml
-test_command = ["python", "-m", "pytest", "-q"]   # default: <python> -m pytest -q
+# .agent-lab.toml
+repository = "OWNER/REPO"
+test_command = ["python", "-m", "pytest", "-q"]   # default: <the project's python> -m pytest -q
 python = "C:/path/to/python.exe"
 test_timeout = 600                                # seconds, 60 to 86400
 test_example = "tests/test_csv_summary.py"        # shown to the agents as an example
+
+[profiles.small]                                  # change a task size for this project
+model = "opus"
 ```
 
-Point the commands at the project with `--repo-path`.
+The project's tests (and its agents' `python`) run with, in order: `python` in `.agent-lab.toml`,
+the project's own `.venv`, `AGENT_LAB_PYTHON`, the Python running the orchestrator. The
+orchestrator itself always runs on this repository's `.venv`. Task worktrees are made in
+`~/agent-worktrees` (`AGENT_LAB_WORKTREE_ROOT`), never inside the project.
 
 ## Commands
 
@@ -58,6 +95,7 @@ Point the commands at the project with `--repo-path`.
 
 | Command | What it does |
 | --- | --- |
+| `init` | set the project up (writes only what is missing) |
 | `issue N` | print an Issue (no AI call) |
 | `ai-plan N` | have a read-only agent break the Issue into tasks |
 | `show-plan RUN` | show the stored plan (no AI call) |
@@ -78,8 +116,9 @@ verification, 9 task needs review.
 
 ```
 orchestrator/
-  settings.py        the only module that reads the environment and .env
-  core/              small shared helpers: secrets, attempts, roles, git, runner paths
+  settings.py        the only module that reads the environment and the .env files
+  core/              small shared helpers: the project and its .agent-lab/ folder,
+                     .agent-lab.toml, secrets, attempts, roles, git, runner paths
   prompts/           every agent's prompt as a Markdown template (+ loader)
   records/           run and task records, step log
   github/            plain GitHub client: Issues, Project board, publishing
@@ -90,7 +129,7 @@ orchestrator/
   monitoring/        status, event feed, dashboard
   cli/               parser, exit codes, display, commands/
 scripts/             claude_runner.py (headless runner), agent_env.py (what agents may see)
-config/profiles.toml task sizes and role shares
+config/profiles.toml default task sizes and role shares
 tests/               one folder per package
 ```
 

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.errors import ExecutionRefused
-from orchestrator.execution.checks import project_python
+from orchestrator.execution.checks import orchestrator_python
 from orchestrator.execution.runner_adapter import PROJECT_ROOT
 from orchestrator.execution.task_runner import prepare
 from orchestrator.records.run_registry import RunRegistryError, utc_now, write_json_atomic
@@ -65,7 +65,7 @@ def run_task_command(run_id: str, task_id: str, *, plans_dir: Path, runs_dir: Pa
                      repo_path: Path, worktree_root: Path | None) -> list[str]:
     """The foreground run-task command the background process runs."""
     command = [
-        project_python(), "-m", "orchestrator", "run-task", run_id, task_id,
+        orchestrator_python(), "-m", "orchestrator", "run-task", run_id, task_id,
         "--plans-dir", str(Path(plans_dir).resolve()),
         "--runs-dir", str(Path(runs_dir).resolve()),
         "--repo-path", str(Path(repo_path).resolve()),

@@ -6,12 +6,13 @@ import argparse
 from pathlib import Path
 
 from orchestrator.cli.exit_codes import EPILOG
-from orchestrator.core.runner_paths import PROJECT_ROOT
 from orchestrator.monitoring import dashboard as dash
 from orchestrator.planning.ai_planner import DEFAULT_PLANNING_MAX_TURNS
 from orchestrator.planning.plan import DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS
 
-DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "orchestration"
+# Runs, plans and the board connection live in the project: <project>/.agent-lab/runs
+# (orchestrator/core/project.py). None here means "the project's"; cli/commands fills it in.
+PROJECT_RUNS = "(default: the project's .agent-lab/runs)"
 
 
 def _add_plan_options(
@@ -23,12 +24,6 @@ def _add_plan_options(
         "--repo",
         default=None,
         help="GitHub repository in OWNER/REPO format (default: AGENT_LAB_REPOSITORY).",
-    )
-    parser.add_argument(
-        "--repo-path",
-        type=Path,
-        default=PROJECT_ROOT,
-        help="Local checkout to create the worktree from.",
     )
     parser.add_argument("--base", default="main", help="Base ref for the branch.")
     parser.add_argument(
@@ -56,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser(
+        "init",
+        help="Get the project ready: its .agent-lab/ folder, a .env for its tokens and an "
+             ".agent-lab.toml. Writes only what is missing; no GitHub or AI calls.",
+    )
+
     issue_parser = subparsers.add_parser(
         "issue",
         help="Fetch and display a GitHub Issue without modifying anything.",
@@ -79,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     ai_plan_parser.add_argument(
         "--plans-dir",
         type=Path,
-        default=DEFAULT_RUNS_DIR,
+        default=None,
         help="Where plans are stored (<plans-dir>/<run-id>/plan.json).",
     )
 
@@ -89,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show_plan_parser.add_argument("run_id", help="Run ID the plan was stored under.")
     show_plan_parser.add_argument(
-        "--plans-dir", type=Path, default=DEFAULT_RUNS_DIR
+        "--plans-dir", type=Path, default=None, help=PROJECT_RUNS
     )
 
     run_task_parser = subparsers.add_parser(
@@ -98,12 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_task_parser.add_argument("run_id", help="Run ID the plan was stored under.")
     run_task_parser.add_argument("task_id", help="Task ID in the plan, e.g. T1.")
-    run_task_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    run_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    run_task_parser.add_argument(
-        "--repo-path", type=Path, default=PROJECT_ROOT,
-        help="Local checkout to create the worktree from.",
-    )
+    run_task_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    run_task_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
     run_task_parser.add_argument(
         "--worktree-root", type=Path, default=None,
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
@@ -130,12 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
              "task needs a person; commits locally, never pushes.",
     )
     run_plan_parser.add_argument("run_id", help="Run ID the plan was stored under.")
-    run_plan_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    run_plan_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    run_plan_parser.add_argument(
-        "--repo-path", type=Path, default=PROJECT_ROOT,
-        help="Local checkout to create the worktrees from.",
-    )
+    run_plan_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    run_plan_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
     run_plan_parser.add_argument(
         "--worktree-root", type=Path, default=None,
         help="Folder for task worktrees (default: AGENT_LAB_WORKTREE_ROOT or ~/agent-worktrees).",
@@ -171,15 +164,15 @@ def build_parser() -> argparse.ArgumentParser:
         connect_parser.add_argument(f"--{place}", metavar="COLUMN", default=None,
                                     help=f"The column for tasks that are {what}, if its name "
                                          "is not recognised.")
-    connect_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    connect_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
     sync_parser = board_commands.add_parser(
         "sync",
         help="Put any task that is not on the board yet there, and move a run's cards to "
              "where its records say (run-plan does this by itself).",
     )
     sync_parser.add_argument("run_id")
-    sync_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    sync_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    sync_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    sync_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     report_parser = subparsers.add_parser(
         "report",
@@ -188,8 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("run_id")
     report_parser.add_argument("--save", action="store_true",
                                help="Also save it as runs/<run>/report.md.")
-    report_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    report_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    report_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    report_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     budget_parser = subparsers.add_parser(
         "budget",
@@ -200,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     budget_change.add_argument("--set", type=float, metavar="USD", dest="limit",
                                help="The most the run's task agents may spend in total.")
     budget_change.add_argument("--remove", action="store_true", help="Remove the limit.")
-    budget_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    budget_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     cancel_parser = subparsers.add_parser(
         "cancel",
@@ -208,15 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cancel_parser.add_argument("run_id")
     cancel_parser.add_argument("task_id")
-    cancel_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    cancel_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     status_parser = subparsers.add_parser(
         "status",
         help="Show every task of a run and what its agents are doing now. Reads files only.",
     )
     status_parser.add_argument("run_id")
-    status_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    status_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    status_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+    status_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
     status_parser.add_argument(
         "--watch", type=float, metavar="SECONDS",
         help="Refresh every SECONDS until nothing is running (Ctrl+C to stop).",
@@ -230,14 +223,29 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("--port", type=int, default=dash.DEFAULT_PORT)
     dashboard_parser.add_argument("--no-browser", action="store_true",
                                   help="Print the address without opening a browser.")
-    dashboard_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    dashboard_parser.add_argument("--plans-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    dashboard_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+    dashboard_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     show_task_parser = subparsers.add_parser(
         "show-task", help="Display a task's record. No GitHub or AI calls."
     )
     show_task_parser.add_argument("run_id")
     show_task_parser.add_argument("task_id")
-    show_task_parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    show_task_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
+    _add_project_option(parser)
     return parser
+
+
+def _add_project_option(parser: argparse.ArgumentParser) -> None:
+    """Every command takes --repo-path: the project's checkout (default: the folder it runs in)."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                _add_project_option(child)
+            return
+    parser.add_argument(
+        "--repo-path", type=Path, default=None,
+        help="The project's checkout (default: the Git repository of the current folder). "
+             "Never the orchestrator's own.",
+    )

@@ -80,3 +80,42 @@ def test_role_settings_describe():
 def test_unknown_role_in_settings():
     with pytest.raises(ValueError, match="Unknown role"):
         role_settings(profile_for("small"), "janitor")
+
+
+# --- a project may change a size in its own .agent-lab.toml ---
+
+
+@pytest.fixture
+def project_with(git_repo):
+    from orchestrator.core.project import find_project
+    from orchestrator.settings import use_project
+
+    def make(text):
+        (git_repo / ".agent-lab.toml").write_text(text, encoding="utf-8")
+        use_project(find_project(git_repo))
+
+    yield make
+    use_project(None)
+
+
+def test_a_project_changes_only_the_fields_it_names(project_with):
+    from orchestrator.planning import profiles as pf
+    project_with('[profiles.small]\nmodel = "opus"\nmax_budget_usd = 0.5\n')
+    small, default = pf.profile_for("small"), pf.PROFILES["small"]
+    assert (small.model, small.max_budget_usd) == ("opus", 0.5)
+    assert (small.effort, small.max_turns) == (default.effort, default.max_turns)
+    assert pf.profile_for("large") == pf.PROFILES["large"]
+
+
+@pytest.mark.parametrize("text, message", [
+    ('[profiles.huge]\nmodel = "opus"\n', "unknown sizes: huge"),
+    ('[profiles.small]\ncolour = "blue"\n', "unknown fields: colour"),
+    ('[profiles.small]\nmax_turns = 0\n', "max_turns must be a positive whole number"),
+    ('[profiles.small]\neffort = "extreme"\n', "effort must be one of"),
+])
+def test_a_wrong_project_profile_is_refused_with_the_file_named(project_with, text, message):
+    from orchestrator.planning import profiles as pf
+    project_with(text)
+    with pytest.raises(ValueError, match=message) as info:
+        pf.profile_for("small")
+    assert ".agent-lab.toml" in str(info.value)

@@ -89,6 +89,7 @@ class PipelineBase:
                     keep_result_text=True,
                     runner_script=self.runner_script,
                     role=name,
+                    python=self.python,
                     **role(name).runner_options(),
                 )
         finally:  # the agent has ended (or never ran): its cap is free for the others

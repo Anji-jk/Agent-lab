@@ -17,31 +17,41 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from orchestrator.core.git import run_git_raw
-from orchestrator.errors import ExecutionRefused
 from orchestrator.settings import PYTHON, load_settings
 
 DELETED = "<deleted>"
 
-# Which Python runs the tests, the background pipeline and the agents' `python`.
-# Not simply the one that started the orchestrator: from a terminal without the
-# venv activated that is the system Python, which has no pytest.
+# Two different Pythons. The orchestrator's own (to start itself again, for a background
+# task) and the project's (its tests, and the agents' plain `python`). The project's is not
+# simply the one running the orchestrator: that one has the orchestrator's packages, not the
+# project's.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTHON_VARIABLE = PYTHON
 PYTEST_CHECK_TIMEOUT_SECONDS = 60
 
 
-def project_python(root: Path = PROJECT_ROOT, environ: dict[str, str] | None = None,
-                   configured: str | None = None) -> str:
-    """AGENT_LAB_PYTHON if set, else the project's configured Python, else its .venv, else this one."""
-    override = load_settings(environ).python
-    if override:
-        return override
-    if configured:
-        return configured
+def _venv_python(root: Path) -> str | None:
     for candidate in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
         if candidate.is_file():
             return str(candidate)
-    return sys.executable
+    return None
+
+
+def orchestrator_python() -> str:
+    """The orchestrator's own Python: its .venv, else the one running now."""
+    return _venv_python(PROJECT_ROOT) or sys.executable
+
+
+def project_python(root: Path, environ: dict[str, str] | None = None,
+                   configured: str | None = None) -> str:
+    """The project's Python, the most specific first: its ``.agent-lab.toml`` setting, its
+    .venv, then AGENT_LAB_PYTHON (this machine's fallback), then the one running now."""
+    if configured:
+        return configured
+    found = _venv_python(Path(root))
+    if found:
+        return found
+    return load_settings(environ).python or sys.executable
 
 
 def with_python_on_path(env: dict[str, str], python: str) -> dict[str, str]:
@@ -69,15 +79,6 @@ def pytest_problem(python: str, env: dict[str, str] | None = None) -> str | None
         return lines[-1][:300] if lines else f"exit code {completed.returncode}"
     return None
 
-
-def _import_time_python() -> str:
-    try:
-        return project_python()
-    except ExecutionRefused:  # a bad setting is reported by the command that reads it
-        return sys.executable
-
-
-DEFAULT_TEST_COMMAND = (_import_time_python(), "-m", "pytest", "-q")
 
 # Files that tools leave behind and that are never part of the work.
 _NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache"})
@@ -465,7 +466,7 @@ def valid_test_id(test_id: object, test_dirs: tuple[str, ...]) -> bool:
 def run_suite(
     worktree: Path,
     *,
-    command: tuple[str, ...] = DEFAULT_TEST_COMMAND,
+    command: tuple[str, ...],
     timeout: int,
     env: dict[str, str] | None = None,
 ) -> CommandResult:
@@ -476,7 +477,7 @@ def run_named_tests(
     worktree: Path,
     test_ids: list[str],
     *,
-    command: tuple[str, ...] = DEFAULT_TEST_COMMAND,
+    command: tuple[str, ...],
     timeout: int,
     env: dict[str, str] | None = None,
 ) -> CommandResult:

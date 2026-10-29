@@ -12,6 +12,9 @@ dev = ["pytest>=8.0"]
 testpaths = ["tests"]
 pythonpath = [".","scripts"]
 
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]   # config/ and scripts/ are not packages
+
 [tool.setuptools.package-data]
 orchestrator = ["prompts/*.md", "prompts/**/*.md", "monitoring/static/*"]
 

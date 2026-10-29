@@ -219,6 +219,7 @@ def test_command_uses_runner_cli_and_keeps_prompt_out(runner_script, tmp_path):
         "--cwd": str(tmp_path / "wt"),
         "--prompt-file": str(tmp_path / "prompt.txt"),
         "--timeout": "60",
+        "--runs-dir": str(runner_adapter.agent_runs_root(runner_script)),
         "--model": "claude-opus-5-5",
         "--max-turns": "7",
     }
@@ -383,9 +384,17 @@ def test_role_is_passed_to_the_runner(runner_script, tmp_path):
 
 
 def test_the_runner_and_its_agents_get_the_projects_python_first_on_path(runner_script, tmp_path):
-    from orchestrator.execution.checks import project_python
+    projects = tmp_path / "project" / ".venv" / "bin" / "python"
+    runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
+    call(runner_script, tmp_path, runner, python=str(projects))
+    _, kwargs = runner.calls[0]
+    path = next(v for k, v in kwargs["env"].items() if k.upper() == "PATH")
+    assert path.split(os.pathsep)[0] == str(projects.parent)
+
+
+def test_without_a_project_python_the_planner_gets_the_running_one(runner_script, tmp_path):
     runner = fake_process(runner_script, "run-1", result={"status": "succeeded"}, code=0)
     call(runner_script, tmp_path, runner)
     _, kwargs = runner.calls[0]
     path = next(v for k, v in kwargs["env"].items() if k.upper() == "PATH")
-    assert path.split(os.pathsep)[0] == str(Path(project_python()).parent)
+    assert path.split(os.pathsep)[0] == str(Path(sys.executable).parent)

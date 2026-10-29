@@ -231,11 +231,17 @@ def test_read_only_flags_restrict_tools_and_ignore_settings():
     assert args[-1] == "PROMPT"
     assert args[args.index("--tools") + 1] == "Read,Grep,Glob"
     assert args[args.index("--disallowedTools") + 1] == "mcp__*"
+    assert args[args.index("--disallowedTools") + 2] == "Read(./.agent-lab/**)"
     assert args[args.index("--permission-prompts") + 1] == "none"
     assert "--restricted" in args
     assert "--allowedTools" not in args  # that flag grants, it never restricts
-    assert args[args.index("--disallowedTools") + 2].startswith("--")
+    assert args[args.index("--disallowedTools") + 3].startswith("--")
     assert args[args.index("--model") + 1] == "opus"
+
+
+def test_the_runner_and_the_orchestrator_name_the_same_data_folder():
+    from orchestrator.core.project import DATA_DIR_NAME
+    assert claude_runner.AGENT_LAB_DATA_DIR == DATA_DIR_NAME
 
 
 def test_normal_runs_are_unchanged():
@@ -293,7 +299,7 @@ def test_effort_and_budget_combine_with_read_only():
 
     assert args[-1] == "PROMPT"
     assert args[args.index("--max-budget-usd") + 1] == "1"
-    assert args[args.index("--disallowedTools") + 2].startswith("--")
+    assert args[args.index("--disallowedTools") + 3].startswith("--")
 
 
 def test_limits_are_omitted_when_unset():
@@ -402,3 +408,12 @@ def test_bad_role_options_are_rejected_before_anything_is_created(tmp_path, kwar
             timeout_seconds=10,
             **kwargs,
         )
+
+
+def test_the_runs_dir_given_by_the_orchestrator_is_where_the_files_go(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _: None)
+    given = tmp_path / "project" / ".agent-lab" / "agents"
+    claude_runner.run_task(task_id="given-dir", prompt="hello", cwd=tmp_path,
+                           timeout_seconds=10, runs_dir=given)
+    assert (given / "given-dir" / "result.json").is_file()
+    assert not (claude_runner.runs_root() / "given-dir").exists()

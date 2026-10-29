@@ -58,7 +58,7 @@ def test_help_lists_commands(capsys):
 
     out = capsys.readouterr().out
     assert info.value.code == 0
-    for command in ("issue", "ai-plan", "show-plan", "run-plan", "run-task", "status",
+    for command in ("init", "issue", "ai-plan", "show-plan", "run-plan", "run-task", "status",
                     "dashboard", "budget", "cancel", "report", "show-task", "board"):
         assert command in out
     assert "exit codes" in out
@@ -392,3 +392,86 @@ def test_display_task_shows_checks_cost_and_history(capsys):
                      "The full test suite fails.", "pending -> building -> failed"):
         assert fragment in out
     assert "Commit:" not in out
+
+# --- the project: found from the current folder, its files in its .agent-lab/ ---
+
+
+def test_runs_and_plans_default_to_the_projects_folder(git_repo, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.task, "run_report", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.chdir(git_repo)
+    assert cli.main(["report", "r"]) == cli.EXIT_OK
+    data = git_repo.resolve() / ".agent-lab"
+    assert seen["runs_dir"] == seen["plans_dir"] == data / "runs"
+    assert seen["repo_path"] == git_repo.resolve()
+    assert (data / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
+
+
+def test_from_a_subfolder_the_project_is_still_its_root(git_repo, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.plan, "run_ai_plan", lambda args: seen.update(vars(args)) or 0)
+    (git_repo / "src").mkdir()
+    monkeypatch.chdir(git_repo / "src")
+    assert cli.main(["ai-plan", "1"]) == cli.EXIT_OK
+    assert seen["repo_path"] == git_repo.resolve()
+
+
+def test_the_orchestrators_own_repository_is_refused_for_planning(monkeypatch, capsys):
+    monkeypatch.setattr(cli.plan, "run_ai_plan", lambda args: pytest.fail("must not plan"))
+    monkeypatch.chdir(cli.PROJECT_ROOT)
+    assert cli.main(["ai-plan", "1"]) == cli.EXIT_REFUSED
+    assert "orchestrator's own repository" in capsys.readouterr().err
+    assert cli.main(["ai-plan", "1", "--repo-path", str(cli.PROJECT_ROOT)]) == cli.EXIT_REFUSED
+
+
+def test_folders_given_on_the_command_line_need_no_project(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.task, "run_report", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.chdir(tmp_path)  # not a Git repository
+    assert cli.main(["report", "r", "--runs-dir", str(tmp_path / "runs")]) == cli.EXIT_OK
+    assert seen["plans_dir"] == tmp_path / "runs"  # plans are kept with the runs
+
+
+def test_the_projects_toml_names_the_repository(git_repo, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.plan, "run_ai_plan", lambda args: seen.update(vars(args)) or 0)
+    (git_repo / ".agent-lab.toml").write_text('repository = "me/ledger"\n', encoding="utf-8")
+    assert cli.main(["ai-plan", "1", "--repo-path", str(git_repo)]) == cli.EXIT_OK
+    assert seen["repo"] == "me/ledger"
+
+
+def test_init_sets_up_a_project_and_only_writes_what_is_missing(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    assert cli.main(["init"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    data = git_repo / ".agent-lab"
+    assert "GITHUB_TOKEN=" in (data / ".env").read_text(encoding="utf-8")
+    assert 'repository = "Anji-jk/Agent-lab"' in (git_repo / ".agent-lab.toml").read_text(encoding="utf-8")
+    assert ".agent-lab/.env" in out and "commit it" in out
+    # the toml is the only new thing Git sees: the folder and its .env are ignored
+    assert subprocess.run(["git", "-C", str(git_repo), "status", "--porcelain"], capture_output=True,
+                          text=True, check=True).stdout.strip() == "?? .agent-lab.toml"
+
+    (data / ".env").write_text("GITHUB_TOKEN=mine\n", encoding="utf-8")
+    assert cli.main(["init"]) == cli.EXIT_OK
+    assert "nothing to do" in capsys.readouterr().out
+    assert (data / ".env").read_text(encoding="utf-8") == "GITHUB_TOKEN=mine\n"
+
+
+def test_init_is_refused_in_the_orchestrators_own_repository(monkeypatch, capsys):
+    monkeypatch.chdir(cli.PROJECT_ROOT)
+    assert cli.main(["init"]) == cli.EXIT_REFUSED
+    assert not (cli.PROJECT_ROOT / ".agent-lab").exists()
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://github.com/me/ledger-cli.git", "me/ledger-cli"),
+    ("https://github.com/me/ledger-cli", "me/ledger-cli"),
+    ("git@github.com:me/ledger-cli.git", "me/ledger-cli"),
+    ("ssh://git@github.com/me/ledger-cli.git", "me/ledger-cli"),
+    ("https://gitlab.com/me/ledger-cli.git", None),
+])
+def test_the_repository_is_read_from_origin(git_repo, url, expected):
+    from orchestrator.core.project import repository_from_origin
+    subprocess.run(["git", "-C", str(git_repo), "remote", "set-url", "origin", url], check=True)
+    assert repository_from_origin(git_repo) == expected

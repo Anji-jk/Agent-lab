@@ -256,12 +256,14 @@ def test_output_is_cut_to_the_tail(tmp_path):
 
 
 def test_run_suite_and_named_tests(repo):
-    suite = tc.run_suite(repo, timeout=120)
+    pytest_cmd = (sys.executable, "-m", "pytest", "-q")
+    suite = tc.run_suite(repo, command=pytest_cmd, timeout=120)
     assert suite.passed
     (repo / "tests" / "test_bad.py").write_text("def test_b():\n    assert False\n")
-    assert not tc.run_suite(repo, timeout=120).passed
-    assert tc.run_named_tests(repo, ["tests/test_app.py"], timeout=120).passed
-    assert not tc.run_named_tests(repo, ["tests/test_bad.py::test_b"], timeout=120).passed
+    assert not tc.run_suite(repo, command=pytest_cmd, timeout=120).passed
+    assert tc.run_named_tests(repo, ["tests/test_app.py"], command=pytest_cmd, timeout=120).passed
+    assert not tc.run_named_tests(repo, ["tests/test_bad.py::test_b"], command=pytest_cmd,
+                                  timeout=120).passed
 
 
 # --- which Python runs the tests (a run started from system Python had no pytest) ---
@@ -279,9 +281,35 @@ def test_project_python_falls_back_to_this_python_without_a_venv(tmp_path):
     assert tc.project_python(tmp_path, environ={}) == sys.executable
 
 
-def test_the_python_variable_wins(tmp_path):
+def _make_venv(root):
+    folder = root / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+    folder.mkdir(parents=True)
+    python = folder / ("python.exe" if sys.platform == "win32" else "python")
+    python.write_text("")
+    return str(python)
+
+
+def test_the_python_variable_is_the_fallback_when_the_project_has_no_venv(tmp_path):
     chosen = str(tmp_path / "elsewhere" / "python.exe")
     assert tc.project_python(tmp_path, environ={tc.PYTHON_VARIABLE: chosen}) == chosen
+
+
+def test_the_projects_venv_beats_the_python_variable(tmp_path):
+    own = _make_venv(tmp_path)
+    elsewhere = str(tmp_path / "elsewhere" / "python.exe")
+    assert tc.project_python(tmp_path, environ={tc.PYTHON_VARIABLE: elsewhere}) == own
+
+
+def test_the_projects_configured_python_beats_everything(tmp_path):
+    _make_venv(tmp_path)
+    configured = str(tmp_path / "configured" / "python.exe")
+    assert tc.project_python(tmp_path, environ={tc.PYTHON_VARIABLE: "x"},
+                             configured=configured) == configured
+
+
+def test_the_orchestrators_python_ignores_the_project_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv(tc.PYTHON_VARIABLE, str(tmp_path / "project" / "python.exe"))
+    assert tc.orchestrator_python() != str(tmp_path / "project" / "python.exe")
 
 
 def test_with_python_on_path_puts_its_folder_first_and_keeps_the_rest(tmp_path):

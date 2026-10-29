@@ -8,6 +8,10 @@ shown to the agents) is read from this file. A missing file means the defaults.
     python = "C:/path/to/python.exe"                   # runs the tests and the agents' `python`
     test_timeout = 1200                                # seconds, 60 to 86400
     test_example = "tests/test_calc.py tests/test_io.py"
+    repository = "OWNER/REPO"                          # its GitHub repository
+
+    [profiles.small]                                   # optional: change a task size
+    model = "opus"                                     # (config/profiles.toml is the default)
 """
 
 from __future__ import annotations
@@ -21,7 +25,8 @@ from orchestrator.errors import ExecutionRefused
 CONFIG_FILE_NAME = ".agent-lab.toml"
 DEFAULT_TEST_EXAMPLE = "tests/test_example.py"
 TIMEOUT_RANGE = (60, 86400)
-KNOWN_KEYS = frozenset({"test_command", "python", "test_timeout", "test_example"})
+KNOWN_KEYS = frozenset({"test_command", "python", "test_timeout", "test_example", "repository",
+                        "profiles"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +35,8 @@ class ProjectConfig:
     python: str | None = None
     test_timeout: int | None = None
     test_example: str = DEFAULT_TEST_EXAMPLE
+    repository: str | None = None
+    profiles: dict[str, object] | None = None  # checked by planning/profiles.py, which knows them
 
 
 def _bad(name: str, why: str) -> ExecutionRefused:
@@ -58,11 +65,22 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
     example = data.get("test_example", DEFAULT_TEST_EXAMPLE)
     if not (isinstance(example, str) and example.strip()):
         raise _bad("test_example", "must be text")
+    repository = data.get("repository")
+    if repository is not None and not (
+        isinstance(repository, str) and repository.strip().count("/") == 1
+        and all(repository.strip().split("/"))
+    ):
+        raise _bad("repository", "must be OWNER/REPO")
+    profiles = data.get("profiles")
+    if profiles is not None and not isinstance(profiles, dict):
+        raise _bad("profiles", "must be a table, such as [profiles.small]")
     return ProjectConfig(
         tuple(command) if command else None,  # type: ignore[arg-type]
         python.strip() if isinstance(python, str) else None,
         timeout,  # type: ignore[arg-type]
         example.strip(),
+        repository.strip() if isinstance(repository, str) else None,
+        profiles,  # type: ignore[arg-type]
     )
 
 

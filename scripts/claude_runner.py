@@ -332,6 +332,9 @@ class ProgressTracker:
         return write_json_atomic(self.path, self.data)
 
 
+# The project's own Agent Lab folder (orchestrator/core/project.py names it too).
+AGENT_LAB_DATA_DIR = ".agent-lab"
+
 # Flags that make a run read-only no matter what the user's or project's
 # settings allow. Inserted right after "-p" so the variadic
 # --disallowedTools value is followed by a flag, never by the prompt.
@@ -341,6 +344,10 @@ READ_ONLY_FLAGS = (
     "Read,Grep,Glob",  # the only built-in tools that exist in this run
     "--disallowedTools",
     "mcp__*",  # --tools does not cover MCP tools
+    # The project's Agent Lab folder (earlier runs, agents' transcripts, the project's
+    # tokens). The planner runs in the project's checkout, so it could read it; a plan must
+    # come from the Issue and the code. Grep and Glob already skip it: Git ignores it.
+    f"Read(./{AGENT_LAB_DATA_DIR}/**)",
     "--permission-prompts",
     "none",  # deny anything that would need approval
 )
@@ -633,6 +640,7 @@ def run_task(
     allowed_tools: Sequence[str] = (),
     disallowed_tools: Sequence[str] = (),
     role: str | None = None,
+    runs_dir: Path | None = None,
 ) -> dict[str, Any]:
     allowed_tools, disallowed_tools = _check_request(
         task_id=task_id, timeout_seconds=timeout_seconds, max_turns=max_turns,
@@ -644,7 +652,7 @@ def run_task(
     if not cwd.is_dir():
         raise NotADirectoryError(f"Working directory does not exist: {cwd}")
 
-    run_dir = runs_root() / task_id
+    run_dir = (Path(runs_dir).resolve() if runs_dir else runs_root()) / task_id
     run_dir.mkdir(parents=True, exist_ok=False)
 
     events_path = run_dir / "events.jsonl"
@@ -798,6 +806,10 @@ def main() -> int:
     prompt_group.add_argument("--prompt")
     prompt_group.add_argument("--prompt-file", type=Path)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument(
+        "--runs-dir", type=Path, default=None,
+        help="Folder for this run's files (default: AGENT_LAB_AGENT_RUNS_DIR, else runs/).",
+    )
     parser.add_argument("--model")
     parser.add_argument("--max-turns", type=int, default=5)
     parser.add_argument(
@@ -851,6 +863,7 @@ def main() -> int:
             allowed_tools=args.allow,
             disallowed_tools=args.deny,
             role=args.role,
+            runs_dir=args.runs_dir,
         )
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

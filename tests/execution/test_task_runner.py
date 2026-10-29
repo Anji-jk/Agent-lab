@@ -328,8 +328,8 @@ def test_check_environment_removes_credentials(monkeypatch):
     monkeypatch.setattr(tr.runner_adapter, "load_agent_env", lambda script: {
         "PATH": "/bin", "ANTHROPIC_API_KEY": "secret", "claude_code_oauth_token": "t",
         "CLAUDE_CONFIG_DIR": "/c", "HOME": "/h"})
-    env = tr.check_environment(Path("x"))
-    python_folder = str(Path(tc.project_python()).parent)  # put first on PATH
+    env = tr.check_environment(Path("x"), "/project/.venv/bin/python")
+    python_folder = str(Path("/project/.venv/bin/python").parent)  # put first on PATH
     assert env == {"PATH": python_folder + os.pathsep + "/bin", "HOME": "/h",
                    "PYTHONDONTWRITEBYTECODE": "1"}
 
@@ -405,8 +405,8 @@ def test_a_test_command_that_is_not_pytest_is_not_checked(world, agents, monkeyp
 
 def test_the_checks_environment_puts_the_projects_python_first_on_path(monkeypatch):
     monkeypatch.setattr(tr.runner_adapter, "load_agent_env", lambda script: {"PATH": "elsewhere"})
-    env = tr.check_environment(Path("runner.py"))
-    folder = str(Path(tc.project_python()).parent)
+    env = tr.check_environment(Path("runner.py"), "/project/.venv/bin/python")
+    folder = str(Path("/project/.venv/bin/python").parent)
     assert env["PATH"].split(os.pathsep) == [folder, "elsewhere"]
 
 
@@ -608,3 +608,22 @@ def test_the_test_time_limit_reaches_the_suite(world, agents, monkeypatch):
     record = run(world, agents)
     started = [e for e in orchestrator_steps(world) if e["step"] == "suite_started"]
     assert started[0]["timeout_seconds"] == 90 and record["findings"]["test_timeout_seconds"] == 90
+
+
+def test_the_tests_and_the_agents_use_the_projects_python_not_the_orchestrators(
+        world, agents, monkeypatch):
+    asked = []
+
+    def projects_python(root, environ=None, configured=None):
+        asked.append(Path(root))
+        return sys.executable  # stands in for <project>/.venv's Python
+
+    monkeypatch.setattr(tc, "project_python", projects_python)
+    record = run(world, agents)
+    assert record["status"] == "done"
+    assert asked == [Path(world["repo"])]  # looked up in the project, not in agent-lab
+    assert {call.get("python") for call in agents.calls} == {sys.executable}
+    events = [json.loads(line) for line in
+              (world["runs"] / RUN_ID / "tasks" / "T1" / "events.jsonl").read_text().splitlines()]
+    suite = next(e for e in events if e.get("step") == "suite_started")
+    assert suite["command"][:3] == [sys.executable, "-m", "pytest"]

@@ -82,7 +82,7 @@ def test_it_starts_the_ordinary_run_task_command_and_returns_once_the_record_exi
     assert fake.started is not None
     command = fake.started["command"]
     # The project's Python, not whichever one started this (system Python had no pytest).
-    assert command[:6] == [bg.project_python(), "-m", "orchestrator", "run-task", RUN, "T1"]
+    assert command[:6] == [bg.orchestrator_python(), "-m", "orchestrator", "run-task", RUN, "T1"]
     assert "--background" not in command  # the child runs in the foreground: no loop
     assert command[command.index("--runs-dir") + 1] == str(world["runs"].resolve())
     assert command[command.index("--worktree-root") + 1] == str(world["worktrees"].resolve())

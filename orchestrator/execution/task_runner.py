@@ -48,7 +48,7 @@ from orchestrator.execution.pipeline.build import BuildStage
 from orchestrator.execution.pipeline.finish import commit_message
 from orchestrator.execution.pipeline.review import ReviewStage
 from orchestrator.execution.pipeline.test_stage import TestingStage
-from orchestrator.execution.project_config import DEFAULT_TEST_EXAMPLE, load_project_config
+from orchestrator.core.project_config import DEFAULT_TEST_EXAMPLE, load_project_config
 from orchestrator.execution.worktrees import WorktreeError, create_worktree
 from orchestrator.settings import TEST_TIMEOUT, load_settings
 
@@ -84,7 +84,7 @@ def test_timeout_seconds(configured: int | None = None) -> int:
     return load_settings().test_timeout or configured or TEST_TIMEOUT_SECONDS
 
 
-def check_environment(runner_script: Path, python: str | None = None) -> dict[str, str]:
+def check_environment(runner_script: Path, python: str) -> dict[str, str]:
     """Environment for running tests: the agents' allowlist minus credentials."""
     env = {
         key: value
@@ -92,7 +92,7 @@ def check_environment(runner_script: Path, python: str | None = None) -> dict[st
         if key.upper() not in CREDENTIAL_VARIABLES
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return tc.with_python_on_path(env, python or tc.project_python())
+    return tc.with_python_on_path(env, python)
 
 
 def find_task(plan: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -249,11 +249,13 @@ class _Pipeline(BuildStage, TestingStage, ReviewStage, PipelineBase):
                  runner_script: Path, invoke_runner, test_command: tuple[str, ...], env,
                  log: TaskLog | NullLog | None = None, attempt: int = 1,
                  feedback: str | None = None, earlier: str | None = None,
-                 is_alive: IsAlive | None = None, test_example: str = DEFAULT_TEST_EXAMPLE):
+                 is_alive: IsAlive | None = None, test_example: str = DEFAULT_TEST_EXAMPLE,
+                 python: str | None = None):
         self.ctx, self.run_id, self.runs_dir = ctx, run_id, runs_dir
         self.is_alive = is_alive or _liveness(runs_dir, run_id, runner_script)
         self.attempt, self.feedback, self.earlier = attempt, feedback, earlier
         self.test_example = test_example
+        self.python = python  # the project's: first on the agents' PATH
         self.reused: dict[str, dict[str, Any]] = {}  # agents' results kept from the stopped attempt
         self.test_timeout = TEST_TIMEOUT_SECONDS
         self.budget_stopped = False
@@ -339,11 +341,10 @@ def run_task(
     if problem:  # refused before anything is created: the task stays as it was
         raise BudgetExhausted(problem)
 
-    python = tc.project_python(configured=config.python)
+    python = tc.project_python(repo_path, configured=config.python)
     env = check_environment(runner_script, python) if env is None else env
     if test_command is None:
-        test_command = config.test_command or (
-            (python, "-m", "pytest", "-q") if config.python else tc.DEFAULT_TEST_COMMAND)
+        test_command = config.test_command or (python, "-m", "pytest", "-q")
     # Before anything is created or paid for: a suite that cannot start fails every task.
     if tuple(test_command[1:3]) == ("-m", "pytest"):
         problem = tc.pytest_problem(test_command[0], env)
@@ -393,7 +394,8 @@ def run_task(
     merging = False
     pipeline = _Pipeline(ctx, run_id, runs_dir, worktree, Path(runner_script),
                          invoke_runner, test_command, env, log, attempt, feedback,
-                         (continue_from or {}).get("earlier"), alive, config.test_example)
+                         (continue_from or {}).get("earlier"), alive, config.test_example,
+                         python=python)
     pipeline.test_timeout = test_timeout
     try:
         if start == "building":

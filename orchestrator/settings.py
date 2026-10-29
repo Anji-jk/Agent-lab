@@ -4,7 +4,10 @@ This is the only module of the orchestrator that reads the environment or the ``
 Everything else asks ``load_settings()`` for a typed, validated ``Settings`` and uses the field
 it needs. ``.env.example`` lists the names.
 
-* A variable set in the shell wins over ``.env``.
+* A variable set in the shell wins over the project's ``.agent-lab/.env``, which wins over the
+  orchestrator's ``.env`` (the fallback for every project).
+* The project's GitHub repository comes from its ``.agent-lab.toml`` before
+  ``AGENT_LAB_REPOSITORY``, so a value kept for one project never points another one elsewhere.
 * Only the names below are taken from ``.env``, and they go into the ``Settings`` object, never
   into the process environment. Other names in the file (``ANTHROPIC_API_KEY`` is on the agents'
   allowlist, ``scripts/agent_env.py``) are left alone on purpose, and neither GitHub token is
@@ -24,6 +27,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.core.project import Project
+from orchestrator.core.project_config import load_project_config
 from orchestrator.errors import ExecutionRefused
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -144,22 +149,47 @@ def _build(values: Mapping[str, str]) -> Settings:
     )
 
 
-def load_settings(environ: Mapping[str, str] | None = None, *, env_file: Path | None = None) -> Settings:
-    """The settings: the shell (or ``environ``) first, then the .env file, then the defaults.
+_active_project: Project | None = None
 
-    With no ``environ`` the real environment is used and the project's ``.env`` is read (or
-    the file named by ``AGENT_LAB_ENV_FILE``). A mapping that is given is taken as the whole
-    environment: the file is read only if ``env_file`` is given too.
+
+def use_project(project: Project | None) -> None:
+    """The project this process works on (the command line sets it once), or None."""
+    global _active_project
+    _active_project = project
+
+
+def active_project() -> Project | None:
+    return _active_project
+
+
+def load_settings(environ: Mapping[str, str] | None = None, *, env_file: Path | None = None) -> Settings:
+    """The settings: the shell (or ``environ``) first, then the .env files, then the defaults.
+
+    With no ``environ`` the real environment is used, and two files are read: the project's
+    ``.agent-lab/.env`` (when a project is active) over the orchestrator's ``.env`` (or the
+    file named by ``AGENT_LAB_ENV_FILE``). A mapping that is given is taken as the whole
+    environment: a file is read only if ``env_file`` is given too.
     """
     given = environ is not None
     environ = os.environ if environ is None else environ
-    if env_file is None and not given:
+    files: list[Path] = []
+    if env_file is not None:
+        files.append(env_file)
+    elif not given:
         chosen = (environ.get(ENV_FILE_VARIABLE) or "").strip()
-        env_file = Path(chosen) if chosen else PROJECT_ROOT / ENV_FILE_NAME
-    merged = dict(read_env_file(env_file)) if env_file is not None else {}
+        files.append(Path(chosen) if chosen else PROJECT_ROOT / ENV_FILE_NAME)
+        if _active_project is not None:
+            files.append(_active_project.env_file)
+    merged: dict[str, str] = {}
+    for path in files:  # later files win
+        merged.update(read_env_file(path))
     for name in SETTING_NAMES:
         if (environ.get(name) or "").strip():
             merged[name] = environ[name]
+    if not given and _active_project is not None:
+        repository = load_project_config(_active_project.root).repository
+        if repository:
+            merged[REPOSITORY] = repository
     return _build(merged)
 
 

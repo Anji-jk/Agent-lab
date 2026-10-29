@@ -19,7 +19,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from orchestrator.execution.project_config import DEFAULT_TEST_EXAMPLE
+from orchestrator.core.project_config import DEFAULT_TEST_EXAMPLE
 from orchestrator.prompts.loader import render
 
 DONE = "done"

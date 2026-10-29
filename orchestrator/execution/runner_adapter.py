@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from orchestrator.execution.checks import project_python, with_python_on_path
-from orchestrator.core.runner_paths import DEFAULT_RUNNER_SCRIPT, PROJECT_ROOT, runner_run_directory  # noqa: F401
+from orchestrator.execution.checks import with_python_on_path
+from orchestrator.core.runner_paths import (  # noqa: F401
+    DEFAULT_RUNNER_SCRIPT, PROJECT_ROOT, agent_runs_root, runner_run_directory,
+)
 from orchestrator.settings import AGENT_RUNS_DIR, process_environment
 
 
@@ -141,6 +143,7 @@ def invoke_runner(
     disallowed_tools: Sequence[str] = (),
     role: str | None = None,
     env: dict[str, str] | None = None,
+    python: str | None = None,
     runner_script: Path = DEFAULT_RUNNER_SCRIPT,
     process_runner: ProcessRunner = subprocess.run,
 ) -> RunnerOutcome:
@@ -160,6 +163,8 @@ def invoke_runner(
         str(prompt_file),
         "--timeout",
         str(timeout_seconds),
+        "--runs-dir",
+        str(agent_runs_root(runner_script)),
     ]
     if model:
         command += ["--model", model]
@@ -194,8 +199,10 @@ def invoke_runner(
             timeout=timeout_seconds + OUTER_TIMEOUT_GRACE,
             check=False,
             # The runner hands PATH on to Claude, so an agent's plain `python` is the
-            # project's Python (with pytest), not whichever one is first on PATH.
-            env=with_python_on_path(process_environment() if env is None else env, project_python()),
+            # project's Python (with pytest), not whichever one is first on PATH. The
+            # planner, which runs no tests, gets the one running now.
+            env=with_python_on_path(process_environment() if env is None else env,
+                                    python or sys.executable),
         )
     except subprocess.TimeoutExpired:
         return RunnerOutcome(
