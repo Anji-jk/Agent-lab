@@ -11,8 +11,6 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -491,15 +489,19 @@ def _check_request(
     return list(allowed), list(disallowed)
 
 
-@dataclass
 class _Stream:
-    """What reading Claude's output collected."""
+    """What reading Claude's output collected.
 
-    event_types: Counter[str] = dataclass_field(default_factory=Counter)
-    result_events: list[dict[str, Any]] = dataclass_field(default_factory=list)
-    parse_errors: int = 0
-    timed_out: bool = False
-    reader_error: str | None = None
+    A plain class: this script is also loaded by file path without being registered as a
+    module (``load_agent_env``), which ``@dataclass`` cannot handle.
+    """
+
+    def __init__(self) -> None:
+        self.event_types: Counter[str] = Counter()
+        self.result_events: list[dict[str, Any]] = []
+        self.parse_errors = 0
+        self.timed_out = False
+        self.reader_error: str | None = None
 
 
 def _take_event(line: str, result: dict[str, Any], stream: _Stream, progress: ProgressTracker) -> None:
