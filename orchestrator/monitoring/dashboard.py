@@ -1,6 +1,9 @@
-"""A local web page that shows every task of a run and what each agent did.
+"""A local web page for one project: its runs, what they cost, and what each agent did.
 
     python -m orchestrator dashboard [run_id]   ->   http://127.0.0.1:8765
+
+Without a run it opens on the project's page (totals and every run); with one, on
+that run. It shows the project it was started in, never any other.
 
 It is a small server built on Python's standard library, so nothing needs
 installing. It only reads the files the orchestrator and the runner already
@@ -36,7 +39,11 @@ from orchestrator.monitoring import event_feed
 
 from orchestrator.monitoring import progress
 
+from orchestrator.core.project import Project
+from orchestrator.core.project_config import load_project_config
 from orchestrator.execution import runner_adapter
+from orchestrator.execution.budget import task_spent
+from orchestrator.github.board import board_path
 from orchestrator.execution.integration import branch_line, describe_merge, load_integration
 from orchestrator.planning.profiles import profile_for, role_settings
 from orchestrator.execution.roles import ROLE_NAMES, role
@@ -56,7 +63,14 @@ STATIC_FILES = {
     "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
 }
 TABS = (*ROLE_NAMES, "orchestrator")
-MAX_RUNS_LISTED = 100
+MAX_RUNS_LISTED = 100  # in the run picker; the project page counts every run
+RUN_STATES = ("complete", "running", "attention", "paused", "planned")
+TASK_GROUPS = {
+    "done": "done", "failed": "failed",
+    "needs_review": "review", "cancelled": "review", "interrupted": "review", "blocked": "review",
+    "running": "running",
+    "ready": "waiting", "waiting": "waiting",
+}
 COMMAND_LINE_SECONDS = 5.0  # how long a process check is reused
 
 # What each agent waits for, shown on a tab that has not started yet.
@@ -103,9 +117,11 @@ class DashboardData:
 
     def __init__(self, runs_dir: Path, plans_dir: Path,
                  runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
-                 get_command_line: Callable[[int], str | None] | None = None):
+                 get_command_line: Callable[[int], str | None] | None = None,
+                 project: Project | None = None):
         self.runs_dir = Path(runs_dir)
         self.plans_dir = Path(plans_dir)
+        self.project_info = project
         self.runner_script = Path(runner_script)
         self._get_command_line = get_command_line
         self._lines: dict[int, tuple[float, str | None]] = {}
@@ -146,6 +162,14 @@ class DashboardData:
 
     # -- the list of runs --
     def runs(self) -> list[dict[str, Any]]:
+        """The run picker's list: the newest runs first."""
+        runs = self._all_runs()[:MAX_RUNS_LISTED]
+        for entry in runs:
+            entry["modified"] = datetime.fromtimestamp(entry["modified"], timezone.utc).isoformat()
+        return runs
+
+    def _all_runs(self) -> list[dict[str, Any]]:
+        """Every run in the project, newest first (by when its files last changed)."""
         found: dict[str, dict[str, Any]] = {}
         for base in {self.plans_dir.resolve(), self.runs_dir.resolve()}:
             if not base.is_dir():
@@ -170,10 +194,7 @@ class DashboardData:
                     except Exception as exc:  # one unreadable plan must not hide the other runs
                         LOG.warning("run %s: its plan could not be read (%s: %s)",
                                     run_id, type(exc).__name__, exc)
-        runs = sorted(found.values(), key=lambda r: r["modified"], reverse=True)[:MAX_RUNS_LISTED]
-        for entry in runs:
-            entry["modified"] = datetime.fromtimestamp(entry["modified"], timezone.utc).isoformat()
-        return runs
+        return sorted(found.values(), key=lambda r: r["modified"], reverse=True)
 
     # -- one run --
     def _plan(self, run_id: str) -> dict[str, Any] | None:
@@ -231,7 +252,8 @@ class DashboardData:
             },
             "active": any(t["active_role"] or t["merging"] for t in tasks)
                       or bool(planner and planner.state in ("starting", "running")),
-            "cost_usd": round(sum(t["cost_usd"] for t in tasks)
+            "cost_usd": round(sum(task_spent(run_id, task_id, record, self.runner_script)
+                                  for task_id, record in records.items())
                               + ((planner.cost_usd or 0.0) if planner else 0.0), 6),
             "now": now.isoformat(),
         }
@@ -294,6 +316,81 @@ class DashboardData:
             "merge": _mask_checks((record or {}).get("merge") or {}) or None,
             "merge_text": describe_merge((record or {}).get("merge")),
             "agents": agents,
+        }
+
+    # -- the project page --
+    def project(self) -> dict[str, Any]:
+        """The project's totals and one row per run, newest first."""
+        from orchestrator.scheduling.run_report import build_report
+
+        rows = []
+        for entry in self._all_runs():
+            run_id = entry["run_id"]
+            if not plan_path(self.plans_dir, run_id).is_file():
+                continue
+            try:
+                report = build_report(run_id, plans_dir=self.plans_dir, runs_dir=self.runs_dir,
+                                      runner_script=self.runner_script,
+                                      get_command_line=self._command_line)
+            except Exception as exc:
+                LOG.warning("run %s: left off the project page (%s: %s)",
+                            run_id, type(exc).__name__, exc)
+                continue
+            planner_cost = report.planner_cost_usd
+            if planner_cost is None:
+                recorded = ((self._plan(run_id) or {}).get("planner") or {}).get("total_cost_usd")
+                planner_cost = recorded if isinstance(recorded, (int, float)) else 0.0
+            rows.append(_run_row(report, planner_cost,
+                                 plan_path(self.plans_dir, run_id).stat().st_mtime))
+        rows.sort(key=lambda r: r["planned_at"], reverse=True)
+
+        runs_by_state = {state: 0 for state in RUN_STATES}
+        tasks_by_group = {group: 0 for group in ("done", "failed", "review", "running", "waiting")}
+        for row in rows:
+            runs_by_state[row["status"]] += 1
+            for group, count in row["task_groups"].items():
+                tasks_by_group[group] += count
+        planner = round(sum(r["planner_cost_usd"] for r in rows), 6)
+        tasks = round(sum(r["tasks_cost_usd"] for r in rows), 6)
+        return {
+            "project": self._describe_project(rows),
+            "totals": {
+                "cost_usd": round(planner + tasks, 6),
+                "planner_cost_usd": planner,
+                "tasks_cost_usd": tasks,
+                "runs": len(rows),
+                "runs_by_state": runs_by_state,
+                "tasks": sum(tasks_by_group.values()),
+                "tasks_by_group": tasks_by_group,
+            },
+            "runs": rows,
+            "active": runs_by_state["running"] > 0,
+            "now": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _describe_project(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        root = self.project_info.root if self.project_info else None
+        repository = None
+        if root is not None:
+            try:
+                repository = load_project_config(root).repository
+            except Exception:
+                repository = None
+        if repository is None:
+            repository = next((r["issue"]["repository"] for r in rows if r["issue"]["repository"]), None)
+        board = None
+        try:
+            saved = json.loads(board_path(self.runs_dir).read_text(encoding="utf-8"))
+            url = saved.get("url")
+            board = {"number": saved.get("number"),
+                     "url": url if isinstance(url, str) and url.startswith("https://github.com/") else None}
+        except (OSError, ValueError, AttributeError):
+            board = None
+        return {
+            "name": root.name if root is not None else self.runs_dir.name,
+            "path": str(root) if root is not None else str(self.runs_dir),
+            "repository": repository,
+            "board": board,
         }
 
     # -- events --
@@ -367,6 +464,44 @@ def _mask_checks(checks: dict[str, Any]) -> dict[str, Any]:
     return masked
 
 
+def _run_state(plan_state: str, started: bool) -> str:
+    if plan_state == "complete":
+        return "complete"
+    if plan_state == "running":
+        return "running"
+    if plan_state == "stopped":
+        return "attention"
+    return "paused" if started else "planned"
+
+
+def _run_row(report: Any, planner_cost: float, planned: float) -> dict[str, Any]:
+    groups = {group: 0 for group in ("done", "failed", "review", "running", "waiting")}
+    for task in report.tasks:
+        groups[TASK_GROUPS.get(task.state, "waiting")] += 1
+    started = report.started_at is not None
+    issue = report.issue or {}
+    url = issue.get("url")
+    return {
+        "run_id": report.run_id,
+        "issue": {
+            "number": issue.get("number"),
+            "title": issue.get("title"),
+            "repository": issue.get("repository"),
+            "url": url if isinstance(url, str) and url.startswith("https://github.com/") else None,
+        },
+        "status": _run_state(report.plan_state, started),
+        "tasks_total": len(report.tasks),
+        "tasks_done": groups["done"],
+        "task_groups": groups,
+        "planner_cost_usd": round(planner_cost, 6),
+        "tasks_cost_usd": report.tasks_cost_usd,
+        "cost_usd": round(planner_cost + report.tasks_cost_usd, 6),
+        "planned_at": datetime.fromtimestamp(planned, timezone.utc).isoformat(),
+        "started_at": report.started_at,
+        "finished_at": report.finished_at,
+    }
+
+
 def _int(query: dict[str, list[str]], name: str, default: int = 0) -> int:
     try:
         return max(0, int(query.get(name, [str(default)])[0]))
@@ -414,6 +549,8 @@ def make_handler(data: DashboardData, allowed_hosts: frozenset[str]):
                 query = parse_qs(url.query)
                 if parts[:2] == ["api", "runs"] and len(parts) == 2:
                     self._json(200, {"runs": data.runs()})
+                elif parts == ["api", "project"]:
+                    self._json(200, data.project())
                 elif parts[:2] == ["api", "run"] and len(parts) == 3:
                     self._json(200, data.run(parts[2]))
                 elif parts[:2] == ["api", "events"] and len(parts) >= 4:

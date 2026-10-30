@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import os
 
 import pytest
 
@@ -10,7 +11,8 @@ from orchestrator.execution.runner_adapter import RUNS_DIR_VARIABLE
 import orchestrator.cli.commands as cli
 from orchestrator.monitoring import dashboard as dash
 from orchestrator.records.task_events import task_events_path
-from orchestrator.planning.plan_file import save_task_plan
+from orchestrator.core.project import Project
+from orchestrator.planning.plan_file import plan_path, save_task_plan
 from orchestrator.records.task_registry import save_task, update_task
 
 RUN = "run-9"
@@ -226,7 +228,8 @@ def test_a_broken_file_gives_an_error_not_a_crash(lab, server):
 def cli_lab(lab, monkeypatch):
     original = dash.DashboardData
     monkeypatch.setattr(cli.monitor.dash, "DashboardData",
-                        lambda runs, plans: original(runs, plans, runner_script=lab["script"]))
+                        lambda runs, plans, project=None: original(runs, plans, runner_script=lab["script"],
+                                                                   project=project))
     return lab
 
 
@@ -313,3 +316,134 @@ def test_an_unreadable_plan_is_logged_not_swallowed(lab, caplog):
         data.run(RUN)
         data.runs()
     assert "its plan could not be read" in caplog.text and RUN in caplog.text
+
+
+# --- the project page: totals and one row per run ------------------------------------------
+
+
+def add_run(lab, run_id, tasks, planned_at, planner_cost=None):
+    """A run with its plan; ``planned_at`` orders the runs (the plan file's time)."""
+    plan = {
+        "issue": {"repository": "o/r", "number": 7, "title": f"Issue of {run_id}", "description": "x",
+                  "url": "https://github.com/o/r/issues/7"},
+        "config": {"repository": "o/r", "base_ref": "main", "base_commit": "abc123", "model": None,
+                   "timeout_seconds": 60, "run_id": run_id, "branch": "b", "worktree_path": "w"},
+        "summary": "s", "tasks": [plan_task(t, f"Task {t}") for t in tasks],
+        "planner": {"run_id": f"{run_id}-plan", "status": "succeeded"},
+    }
+    save_task_plan(lab["plans"], run_id, plan)
+    if planner_cost is not None:
+        (lab["agents"] / f"{run_id}-plan").mkdir(parents=True, exist_ok=True)
+        (lab["agents"] / f"{run_id}-plan" / "progress.json").write_text(json.dumps(
+            {"state": "finished", "status": "succeeded", "total_cost_usd": planner_cost}), encoding="utf-8")
+    path = plan_path(lab["plans"], run_id)
+    os.utime(path, (planned_at, planned_at))
+
+
+def finish(lab, run_id, task_id, status, **extra):
+    save_task(lab["runs"], run_id, task_id, {"title": f"Task {task_id}", "complexity": "small", **extra})
+    for step in ("building", "testing", "reviewing", status):
+        update_task(lab["runs"], run_id, task_id, {"status": step})
+
+
+@pytest.fixture
+def project_lab(lab, tmp_path):
+    """Four runs: one running, one complete after a retry, one stopped, one only planned."""
+    os.utime(plan_path(lab["plans"], RUN), (1_000, 1_000))
+    add_run(lab, "run-old", ["T1"], planned_at=500, planner_cost=0.1)
+    finish(lab, "run-old", "T1", "done", attempt=2,
+           previous_attempts=[{"attempt": 1, "status": "failed", "cost_usd": 0.15}],
+           agents={"builder": {"total_cost_usd": 0.05}, "tester": {"total_cost_usd": 0.04},
+                   "reviewer": {"total_cost_usd": 0.03}})
+    add_run(lab, "run-stop", ["T1"], planned_at=2_000)
+    finish(lab, "run-stop", "T1", "needs_review", agents={"builder": {"total_cost_usd": 0.2}})
+    add_run(lab, "run-new", ["T1", "T2"], planned_at=3_000)
+    root = tmp_path / "ledger-cli"
+    root.mkdir()
+    (root / ".agent-lab.toml").write_text('repository = "Anji-jk/ledger-cli"\n', encoding="utf-8")
+    (lab["runs"] / "board.json").write_text(json.dumps(
+        {"number": 4, "url": "https://github.com/users/Anji-jk/projects/4"}), encoding="utf-8")
+    data = dash.DashboardData(lab["runs"], lab["plans"], runner_script=lab["script"],
+                              get_command_line=running_t1, project=Project(root))
+    return {**lab, "data": data}
+
+
+def rows_by_id(page):
+    return {row["run_id"]: row for row in page["runs"]}
+
+
+def test_each_run_gets_its_state_and_the_newest_comes_first(project_lab):
+    page = project_lab["data"].project()
+    assert [r["run_id"] for r in page["runs"]] == ["run-new", "run-stop", RUN, "run-old"]
+    states = {run_id: row["status"] for run_id, row in rows_by_id(page).items()}
+    assert states == {"run-new": "planned", "run-stop": "attention", RUN: "running", "run-old": "complete"}
+    assert page["active"] is True
+
+
+def test_a_retried_task_costs_every_attempt(project_lab):
+    old = rows_by_id(project_lab["data"].project())["run-old"]
+    assert old["tasks_cost_usd"] == pytest.approx(0.27)
+    assert old["planner_cost_usd"] == pytest.approx(0.1)
+    assert old["cost_usd"] == pytest.approx(0.37)
+    assert (old["tasks_done"], old["tasks_total"]) == (1, 1)
+    run = project_lab["data"].run("run-old")
+    assert run["cost_usd"] == pytest.approx(0.37)
+
+
+def test_the_totals_add_up_every_run(project_lab):
+    totals = project_lab["data"].project()["totals"]
+    assert totals["runs"] == 4
+    assert totals["runs_by_state"] == {"complete": 1, "running": 1, "attention": 1, "paused": 0, "planned": 1}
+    assert totals["tasks"] == 6
+    assert totals["tasks_by_group"] == {"done": 1, "failed": 0, "review": 1, "running": 1, "waiting": 3}
+    assert totals["tasks_cost_usd"] == pytest.approx(0.27 + 0.2 + 0.1)
+    assert totals["cost_usd"] == pytest.approx(totals["tasks_cost_usd"] + totals["planner_cost_usd"])
+
+
+def test_an_older_run_without_a_planner_progress_file_uses_the_plans_record(project_lab):
+    nine = rows_by_id(project_lab["data"].project())[RUN]
+    assert nine["planner_cost_usd"] == pytest.approx(0.085)
+
+
+def test_the_project_names_its_repository_and_board(project_lab):
+    project = project_lab["data"].project()["project"]
+    assert project["name"] == "ledger-cli"
+    assert project["repository"] == "Anji-jk/ledger-cli"
+    assert project["board"] == {"number": 4, "url": "https://github.com/users/Anji-jk/projects/4"}
+
+
+def test_without_a_board_or_a_project_the_page_still_works(lab):
+    page = lab["data"].project()
+    assert page["project"]["board"] is None
+    assert page["project"]["repository"] == "o/r"
+    assert page["totals"]["runs"] == 1
+
+
+def test_a_run_with_an_unreadable_plan_is_left_off_and_logged(project_lab, caplog):
+    plan_path(project_lab["plans"], "run-stop").write_text("{not json", encoding="utf-8")
+    page = project_lab["data"].project()
+    assert "run-stop" not in rows_by_id(page) and page["totals"]["runs"] == 3
+    assert "run-stop" in caplog.text
+
+
+def test_a_paused_run_has_started_but_nothing_runs_now(project_lab):
+    add_run(project_lab, "run-half", ["T1", "T2"], planned_at=4_000)
+    finish(project_lab, "run-half", "T1", "done", agents={})
+    assert rows_by_id(project_lab["data"].project())["run-half"]["status"] == "paused"
+
+
+def test_the_project_page_is_served(project_lab):
+    srv = dash.make_server(project_lab["data"], port=0)
+    dash.serve_in_background(srv)
+    try:
+        status, body = get_json(srv, "/api/project")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert status == 200 and body["project"]["name"] == "ledger-cli" and len(body["runs"]) == 4
+
+
+def test_the_runs_table_shows_ten_runs_a_page_and_the_chart_twelve():
+    js = (dash.STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    assert "const TABLE_PAGE = 10;" in js and "const CHART_PAGE = 12;" in js
+    assert '"Older →"' in js and '"← Newer"' in js  # the table's older runs are on the next page

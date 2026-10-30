@@ -102,7 +102,7 @@ orchestrator itself always runs on this repository's `.venv`. Task worktrees are
 | `run-plan RUN` | run the plan's tasks, together where it allows, until done or a task needs a person |
 | `run-task RUN T1` | run one task; `--retry` for a failed one, `--continue` for a stopped one, `--background` to detach |
 | `status RUN` | progress in the terminal (`--watch 2`) |
-| `dashboard [RUN]` | progress in the browser, with each agent's events |
+| `dashboard [RUN]` | the project in the browser: totals, spend per run and every run; open a run for its tasks and each agent's events |
 | `show-task RUN T1` | one task's full record |
 | `report RUN` | the run's summary (`--save` writes `report.md`) |
 | `budget RUN` | show, `--set USD` or `--remove` the run's spending limit |

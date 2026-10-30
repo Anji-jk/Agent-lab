@@ -10,17 +10,22 @@
 <body>
 <header class="top">
   <span class="brand">Agent Lab</span>
-  <label class="run-pick"><span class="sr">Run</span><select id="run"></select></label>
+  <span id="project-name" class="project-name"></span>
+  <a id="back" class="back" href="#" hidden></a>
+  <label id="run-pick" class="run-pick" hidden><span class="sr">Run</span><select id="run"></select></label>
   <span id="issue" class="issue"></span>
   <span class="spacer"></span>
   <span id="cost" class="cost"></span>
   <span id="live" class="live"></span>
 </header>
-<nav id="tasks" class="tasks" aria-label="Plan and tasks"></nav>
-<main class="main">
-  <div id="tabs" class="tabs" role="tablist" aria-label="Agents"></div>
-  <section id="panel" class="panel" aria-live="polite"></section>
-</main>
+<main id="project" class="project" hidden aria-live="polite"></main>
+<div id="run-view" hidden>
+  <nav id="tasks" class="tasks" aria-label="Plan and tasks"></nav>
+  <main class="main">
+    <div id="tabs" class="tabs" role="tablist" aria-label="Agents"></div>
+    <section id="panel" class="panel" aria-live="polite"></section>
+  </main>
+</div>
 <div id="error" class="load-error" role="alert" hidden>
   <span id="error-text"></span>
   <button id="error-close" type="button" aria-label="Dismiss">×</button>

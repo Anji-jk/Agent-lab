@@ -1,4 +1,5 @@
-// Agent Lab dashboard. Reads the local server's JSON and draws it.
+// Agent Lab dashboard. Reads the local server's JSON and draws it: the project's page
+// (its totals and every run) when the address has no run, else that run.
 // Every piece of text from a run goes on screen through textContent, never as HTML:
 // agent output holds whatever the agent read, and it must not run in this page.
 "use strict";
@@ -9,6 +10,7 @@
   const KIND = { start: "started", say: "says", think: "thinks", finish: "finished", error: "error", step: "step" };
   const RESULT = { ok: "ok", error: "error", blocked: "blocked", warn: "warning", background: "background" };
   const S = {
+    view: "project", project: null, projectSig: "", chartPage: 0, tablePage: 0, filter: "all",
     runs: [], runId: null, run: null,
     sel: { task: null, tab: null }, follow: true,
     feeds: new Map(), open: new Set(), full: new Map(), signature: "",
@@ -155,12 +157,34 @@
 
   // ---- drawing ------------------------------------------------------------------------
   function render() {
+    const inRun = S.view === "run";
+    $("project").hidden = inRun;
+    $("run-view").hidden = !inRun;
     renderTop();
+    if (!inRun) { renderProject(); return; }
     renderTasks();
     renderTabs();
     renderPanel();
   }
   function renderTop() {
+    const inRun = S.view === "run";
+    const name = S.project ? S.project.project.name : "";
+    document.title = name ? `${name} · Agent Lab` : "Agent Lab Dashboard";
+    $("project-name").textContent = inRun ? "" : name;
+    $("project-name").hidden = inRun;
+    $("back").hidden = !inRun;
+    $("back").textContent = `← ${name || "Project"}`;
+    $("run-pick").hidden = !inRun;
+    $("issue").hidden = !inRun;
+    if (!inRun) {
+      const p = S.project;
+      const running = p ? p.totals.runs_by_state.running : 0;
+      const fresh = S.lastOk ? ago((Date.now() - S.lastOk) / 1000) : "";
+      $("cost").textContent = p ? `${money(p.totals.cost_usd)} spent` : "";
+      $("live").className = "live" + (running ? " on" : "");
+      $("live").textContent = !p ? "" : running ? `${plural(running, "run")} running · updated ${fresh} ago` : "nothing running";
+      return;
+    }
     const select = $("run");
     const ids = S.runs.map((r) => r.run_id);
     if (S.runId && !ids.includes(S.runId)) ids.unshift(S.runId);
@@ -262,6 +286,213 @@
     const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 140;
     events.replaceChildren(eventList(key, feed, live));
     if (live && atBottom && S.follow) window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  // ---- the project page ------------------------------------------------------------
+  const CHART_PAGE = 12;
+  const TABLE_PAGE = 10;  // rows per page of the runs table: the newest 10, then older pages
+  const RUN_STATE = {
+    complete: ["Complete", "ok"], running: ["Running", "running"], attention: ["Needs attention", "bad"],
+    paused: ["Paused", "warn"], planned: ["Planned", ""],
+  };
+  const FILTERS = [
+    ["all", "All", () => true],
+    ["running", "Running", (r) => r.status === "running"],
+    ["complete", "Complete", (r) => r.status === "complete"],
+    ["attention", "Needs attention", (r) => r.status === "attention"],
+    ["unfinished", "Not finished", (r) => r.status === "paused" || r.status === "planned"],
+  ];
+  const OUTCOMES = [["done", "Done"], ["failed", "Failed"], ["review", "Needs review"],
+                    ["running", "Running now"], ["waiting", "Not started"]];
+  const plural = (n, one) => `${n} ${n === 1 ? one : one + "s"}`;
+  function duration(seconds) {
+    if (seconds == null || !Number.isFinite(seconds)) return "—";
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)} min`;
+    return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  }
+  function when(iso) {
+    const d = new Date(iso || "");
+    return Number.isNaN(d.getTime()) ? "—"
+      : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  function runTime(r) {
+    if (r.status === "running") return r.started_at ? `${duration(since(r.started_at))} so far` : "running";
+    if (!r.started_at || !r.finished_at) return "—";
+    return duration((new Date(r.finished_at) - new Date(r.started_at)) / 1000);
+  }
+  function day(iso) {
+    const d = new Date(iso || "");
+    return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString([], { day: "numeric", month: "short" });
+  }
+  const issueText = (r) => (r.issue && r.issue.title ? `#${r.issue.number} ${r.issue.title}` : r.run_id);
+  const runHref = (r) => `#${encodeURIComponent(r.run_id)}`;
+  const githubUrl = (repository) => `https://github.com/${repository.split("/").map(encodeURIComponent).join("/")}`;
+
+  function renderProject(force) {
+    const box = $("project");
+    const p = S.project;
+    if (!p) {
+      if (!box.firstChild) box.replaceChildren(h("div", { class: "empty", text: "Loading the project…" }));
+      return;
+    }
+    const signature = JSON.stringify([p.project, p.totals, p.runs, S.chartPage, S.tablePage, S.filter]);
+    if (!force && signature === S.projectSig) return;
+    S.projectSig = signature;
+    const focused = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.key : null;
+    const parts = [projectTitle(p.project), projectCards(p)];
+    if (!p.runs.length) {
+      parts.push(h("div", { class: "empty", text: "No runs yet. Plan an Issue with: python -m orchestrator ai-plan <number>" }));
+    } else {
+      parts.push(h("div", { class: "boxes" }, spendChart(p.runs), outcomes(p.totals)), runsTable(p.runs));
+    }
+    box.replaceChildren(...parts);
+    const chart = box.querySelector(".chart");
+    if (chart) chart.scrollLeft = chart.scrollWidth;
+    if (focused) {  // the last page disables the button that led there: focus its partner
+      const partner = focused.endsWith("-older") ? focused.replace(/-older$/, "-newer")
+        : focused.replace(/-newer$/, "-older");
+      const again = [focused, partner].map((name) => box.querySelector(`[data-key="${name}"]`))
+        .find((node) => node && !node.disabled);
+      if (again) again.focus();
+    }
+  }
+  function projectTitle(info) {
+    const bits = [h("h1", { text: info.name })];
+    if (info.repository) {
+      bits.push(h("a", { class: "mono", href: githubUrl(info.repository), target: "_blank",
+        rel: "noopener noreferrer", text: info.repository }));
+    }
+    if (info.board) {
+      const text = `GitHub board #${info.board.number}`;
+      bits.push(info.board.url
+        ? h("a", { class: "mono", href: info.board.url, target: "_blank", rel: "noopener noreferrer", text })
+        : h("span", { class: "mono muted", text }));
+    }
+    bits.push(h("span", { class: "mono muted path", text: info.path }));
+    return h("div", { class: "ptitle" }, bits);
+  }
+  function stat(label, value, ...lines) {
+    return h("div", { class: "stat" }, h("span", { class: "label", text: label }),
+      h("span", { class: "value", text: value }),
+      lines.filter(Boolean).map((line) => h("span", { class: "sub", text: line })));
+  }
+  function projectCards(p) {
+    const t = p.totals;
+    const rs = t.runs_by_state;
+    const tg = t.tasks_by_group;
+    const runs = [`${rs.complete} complete`, `${rs.running} running`,
+      `${rs.attention} ${rs.attention === 1 ? "needs" : "need"} attention`];
+    if (rs.paused) runs.push(`${rs.paused} paused`);
+    if (rs.planned) runs.push(`${rs.planned} planned`);
+    const tasks = [`${tg.done} done`, `${tg.failed} failed`, `${tg.review} ${tg.review === 1 ? "needs" : "need"} review`];
+    if (tg.running) tasks.push(`${tg.running} running`);
+    if (tg.waiting) tasks.push(`${tg.waiting} not started`);
+    const last = p.runs[0];
+    return h("section", { class: "stats-wrap", "aria-label": "Totals for this project" },
+      h("h2", { class: "section-title", text: "Totals for this project" }),
+      h("div", { class: "stats" },
+        stat("Total spent", money(t.cost_usd), `planner ${money(t.planner_cost_usd)} · tasks ${money(t.tasks_cost_usd)}`),
+        stat("Run summary", plural(t.runs, "run"), runs.join(" · "), `${plural(t.tasks, "task")}: ${tasks.join(" · ")}`),
+        last ? stat("Last run", runTime(last) === "—" ? RUN_STATE[last.status][0] : runTime(last),
+                    `${when(last.started_at || last.planned_at)} · ${money(last.cost_usd)}`, issueText(last))
+             : stat("Last run", "—", "no runs yet")));
+  }
+  function key(kind, label) {
+    return h("span", { class: "key" }, h("span", { class: `swatch ${kind}` }), label);
+  }
+  // Page 0 is the newest. The chart reads oldest on the left, so older is to the left;
+  // the table reads newest at the top, so its older runs are on the next page, to the right.
+  function pager(page, pages, label, older, newer, prefix, olderOnRight) {
+    if (pages < 2) return null;
+    const olderButton = h("button", { type: "button", "data-key": `${prefix}-older`, disabled: page >= pages - 1,
+      text: olderOnRight ? "Older →" : "← Older", onclick: older });
+    const newerButton = h("button", { type: "button", "data-key": `${prefix}-newer`, disabled: page === 0,
+      text: olderOnRight ? "← Newer" : "Newer →", onclick: newer });
+    const text = h("span", { class: "muted", text: label });
+    return h("div", { class: "pager" }, ...(olderOnRight ? [newerButton, text, olderButton] : [olderButton, text, newerButton]));
+  }
+  function spendChart(runs) {
+    const pages = Math.max(1, Math.ceil(runs.length / CHART_PAGE));
+    S.chartPage = Math.min(S.chartPage, pages - 1);
+    const start = S.chartPage * CHART_PAGE;
+    const shown = runs.slice(start, start + CHART_PAGE).reverse();
+    const top = Math.max(0.0001, ...shown.map((r) => r.cost_usd));
+    const columns = shown.map((r) => {
+      const planner = h("span", { class: "seg spend-planner" });
+      const tasks = h("span", { class: "seg spend-tasks" });
+      planner.style.height = `${Math.round((r.planner_cost_usd / top) * 150)}px`;
+      tasks.style.height = `${Math.round((r.tasks_cost_usd / top) * 150)}px`;
+      return h("a", { class: "bar-col", href: runHref(r),
+        title: `${issueText(r)}: ${money(r.cost_usd)} (planner ${money(r.planner_cost_usd)}, tasks ${money(r.tasks_cost_usd)})` },
+        h("span", { class: "bar-value", text: `$${r.cost_usd.toFixed(2)}` }),
+        h("span", { class: "bar", "aria-hidden": "true" }, planner, tasks),
+        h("span", { class: "bar-label", text: r.issue && r.issue.number != null ? `#${r.issue.number}` : r.run_id.slice(-6) }),
+        h("span", { class: "bar-date", text: day(r.started_at || r.planned_at) }));
+    });
+    const label = `Runs ${start + 1}–${start + shown.length} of ${runs.length}, newest first`;
+    return h("section", { class: "box chart-box", "aria-label": "Spend per run" },
+      h("div", { class: "box-head" }, h("h2", { text: "Spend per run" }), key("spend-planner", "Planner"), key("spend-tasks", "Tasks")),
+      h("div", { class: "chart" }, columns),
+      pager(S.chartPage, pages, label,
+        () => { S.chartPage += 1; renderProject(true); }, () => { S.chartPage -= 1; renderProject(true); }, "chart"));
+  }
+  function outcomes(t) {
+    const groups = t.tasks_by_group;
+    const stack = h("div", { class: "stack", "aria-hidden": "true" });
+    for (const [kind] of OUTCOMES) {
+      if (!groups[kind]) continue;
+      const seg = h("span", { class: `seg ${kind}` });
+      seg.style.flexGrow = String(groups[kind]);
+      stack.append(seg);
+    }
+    return h("section", { class: "box", "aria-label": "What happened to the tasks" },
+      h("div", { class: "box-head" }, h("h2", { text: "What happened to the tasks" })), stack,
+      h("ul", { class: "legend" }, OUTCOMES.map(([kind, label]) => h("li", null,
+        h("span", { class: `swatch ${kind}` }), h("span", { class: "grow", text: label }),
+        h("span", { class: "num", text: String(groups[kind]) })))));
+  }
+  function runsTable(runs) {
+    const counts = Object.fromEntries(FILTERS.map(([name, , test]) => [name, runs.filter(test).length]));
+    const [, , test] = FILTERS.find(([name]) => name === S.filter) || FILTERS[0];
+    const chosen = runs.filter(test);
+    const pages = Math.max(1, Math.ceil(chosen.length / TABLE_PAGE));
+    S.tablePage = Math.min(S.tablePage, pages - 1);
+    const start = S.tablePage * TABLE_PAGE;
+    const shown = chosen.slice(start, start + TABLE_PAGE);
+    const filters = h("div", { class: "filters", role: "group", "aria-label": "Show runs" },
+      FILTERS.map(([name, label]) => h("button", {
+        type: "button", class: "filter", "data-key": `filter-${name}`, "aria-pressed": String(S.filter === name),
+        text: `${label} ${counts[name]}`, onclick: () => { S.filter = name; S.tablePage = 0; renderProject(true); },
+      })));
+    const rows = shown.map((r) => {
+      const [label, tone] = RUN_STATE[r.status] || [r.status, ""];
+      const fill = h("span", { class: "fill" });
+      fill.style.width = `${r.tasks_total ? Math.round((r.tasks_done / r.tasks_total) * 100) : 0}%`;
+      return h("tr", { onclick: () => { location.hash = runHref(r); } },
+        h("td", null, h("a", { class: "mono", href: runHref(r), text: r.run_id })),
+        h("td", { class: "issue-cell", text: issueText(r), title: issueText(r) }),
+        h("td", null, h("span", { class: `chip ${tone}`, text: label })),
+        h("td", null, h("span", { class: "progress" }, h("span", { class: "track", "aria-hidden": "true" }, fill),
+          `${r.tasks_done} of ${r.tasks_total}`)),
+        h("td", { class: "num", text: money(r.cost_usd) }),
+        h("td", { class: "num", text: runTime(r) }),
+        h("td", { class: "muted", text: when(r.started_at || r.planned_at) }));
+    });
+    if (!rows.length) rows.push(h("tr", null, h("td", { colspan: "7", class: "muted", text: "No runs here." })));
+    const table = h("table", { class: "runs-table" },
+      h("thead", null, h("tr", null, ["Run", "Issue", "Status", "Tasks", "Cost", "Time", "Started"].map((name) =>
+        h("th", { scope: "col", class: ["Cost", "Time"].includes(name) ? "num" : null, text: name })))),
+      h("tbody", null, rows));
+    const label = `Runs ${chosen.length ? start + 1 : 0}–${start + shown.length} of ${chosen.length}, `
+      + `page ${S.tablePage + 1} of ${pages}`;
+    return h("section", { class: "runs", "aria-label": "Runs" },
+      h("div", { class: "runs-head" }, h("h2", { class: "section-title", text: `Runs (${runs.length}), newest first` }), filters),
+      h("div", { class: "table-box" }, table),
+      pager(S.tablePage, pages, label,
+        () => { S.tablePage += 1; renderProject(true); }, () => { S.tablePage -= 1; renderProject(true); }, "table", true));
   }
   // Elapsed times on steps still running tick every second without redrawing the list.
   function tickElapsed() {
@@ -491,19 +722,47 @@
       showError(err.message);
     }
   }
+  async function loadProject() {
+    try {
+      S.project = await api("/api/project");
+      S.lastOk = Date.now();
+      clearError();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
   async function tick() {
     clearTimeout(S.timer);
     if (!S.busy) {
       S.busy = true;
       try {
-        await loadRun();
-        await refreshFeed();
+        if (S.view === "project") {
+          await loadProject();
+        } else {
+          await loadRun();
+          await refreshFeed();
+        }
         render();
       } finally {
         S.busy = false;
       }
     }
-    S.timer = setTimeout(tick, S.run && S.run.active ? 2000 : 10000);
+    const wait = S.view === "project" ? (S.project && S.project.active ? 5000 : 30000)
+      : (S.run && S.run.active ? 2000 : 10000);
+    S.timer = setTimeout(tick, wait);
+  }
+  function applyHash() {
+    const wanted = readHash();
+    if (!wanted.run) {
+      S.view = "project";
+      S.projectSig = "";
+      return;
+    }
+    S.view = "run";
+    if (wanted.run !== S.runId) {
+      S.runId = wanted.run; S.run = null; S.follow = true; S.sel = { task: null, tab: null }; S.signature = "";
+    }
+    if (wanted.task) { S.follow = false; S.sel = { task: wanted.task, tab: wanted.tab }; }
   }
 
   async function start() {
@@ -513,9 +772,10 @@
       S.signature = ""; tick();
     });
     window.addEventListener("hashchange", () => {
-      const wanted = readHash();
-      if (wanted.run && wanted.run !== S.runId) { S.runId = wanted.run; S.run = null; }
-      if (wanted.task) { S.follow = false; S.sel = { task: wanted.task, tab: wanted.tab }; }
+      const before = S.view;
+      applyHash();
+      if (before !== S.view) window.scrollTo(0, 0);
+      render();
       tick();
     });
     setInterval(() => { renderTop(); tickElapsed(); }, 1000);
@@ -524,11 +784,10 @@
     } catch (err) {
       showError(err.message);
     }
-    const wanted = readHash();
-    S.runId = wanted.run || (S.runs[0] && S.runs[0].run_id) || null;
-    if (wanted.task) { S.follow = false; S.sel = { task: wanted.task, tab: wanted.tab }; }
+    applyHash();
     render();
     tick();
+    if (S.view === "run") loadProject().then(renderTop);
   }
   start();
 })();

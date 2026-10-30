@@ -18,6 +18,7 @@ from orchestrator.records.run_registry import RunRegistryError
 from orchestrator.records.task_registry import list_tasks
 from orchestrator.scheduling.plan_progress import format_plan_progress, plan_progress
 from orchestrator.scheduling.run_plan import describe_next, next_action
+from orchestrator.settings import active_project
 
 
 def _print_status(run_id: str, runs_dir: Path, plans_dir: Path) -> bool:
@@ -71,7 +72,8 @@ def run_status_command(args: argparse.Namespace) -> int:
 
 
 def run_dashboard(args: argparse.Namespace) -> int:
-    data = dash.DashboardData(args.runs_dir, args.plans_dir)
+    # The project the command was started in (cli/commands finds it): the page shows only it.
+    data = dash.DashboardData(args.runs_dir, args.plans_dir, project=active_project())
     try:
         server = dash.make_server(data, port=args.port)
     except OSError as exc:

@@ -217,9 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",
-        help="Open a local web page showing every task and agent of a run. Reads files only.",
+        help="Open a local web page showing this project and its runs, or one run. Reads files only.",
     )
-    dashboard_parser.add_argument("run_id", nargs="?", help="Run to open first (default: the newest).")
+    dashboard_parser.add_argument("run_id", nargs="?", help="Run to open (default: the project's page, with every run).")
     dashboard_parser.add_argument("--port", type=int, default=dash.DEFAULT_PORT)
     dashboard_parser.add_argument("--no-browser", action="store_true",
                                   help="Print the address without opening a browser.")
