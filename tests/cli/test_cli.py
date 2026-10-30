@@ -475,3 +475,18 @@ def test_the_repository_is_read_from_origin(git_repo, url, expected):
     from orchestrator.core.project import repository_from_origin
     subprocess.run(["git", "-C", str(git_repo), "remote", "set-url", "origin", url], check=True)
     assert repository_from_origin(git_repo) == expected
+
+
+def test_the_plan_shows_the_model_claude_ran_on_when_none_was_asked_for(tmp_path, capsys):
+    from orchestrator.cli.display import display_task_plan
+
+    def shown(model, used):
+        doc = stored_plan_document()
+        doc["config"]["model"] = model
+        doc["planner"]["model_used"] = used
+        display_task_plan(doc, tmp_path / "plan.json")
+        return next(line for line in capsys.readouterr().out.splitlines() if line.startswith("Model:"))
+
+    assert shown(None, "claude-sonnet-5-5") == "Model:       claude-sonnet-5-5 (Claude default)"
+    assert shown("opus", "claude-opus-5-5") == "Model:       opus"
+    assert shown(None, None) == "Model:       (Claude default)"

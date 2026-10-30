@@ -10,7 +10,7 @@ from orchestrator.cli.exit_codes import EXIT_OK, EXIT_REFUSED
 from orchestrator.execution.worktrees import verify_remote_repository
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.issue import Task
-from orchestrator.planning.ai_planner import generate_ai_plan
+from orchestrator.planning.ai_planner import generate_ai_plan, DEFAULT_PLANNER_MODEL
 from orchestrator.planning.plan import ExecutionPlan, build_plan
 from orchestrator.planning.plan_file import load_task_plan, plan_path
 
@@ -30,7 +30,7 @@ def load_plan(args: argparse.Namespace) -> ExecutionPlan:
         args.repo_path,
         base_ref=args.base,
         timeout_seconds=args.timeout,
-        model=args.model,
+        model=args.model or DEFAULT_PLANNER_MODEL,
         max_turns=args.max_turns,
         run_id=args.run_id,
     )

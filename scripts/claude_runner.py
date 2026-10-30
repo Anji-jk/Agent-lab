@@ -137,6 +137,12 @@ def _token_totals(results: list[dict[str, Any]]) -> dict[str, int | float | None
         totals[field] = sum(numbers) if numbers else None
     return totals
 
+def models_billed(result_event: dict[str, Any] | None) -> str | None:
+    """The models Claude's result says it used (the keys of modelUsage), or None."""
+    usage = result_event.get("modelUsage") if isinstance(result_event, dict) else None
+    if isinstance(usage, dict) and usage:
+        return ", ".join(sorted(map(str, usage)))
+    return None
 
 def extract_usage(
     result_event: dict[str, Any] | None,
@@ -533,6 +539,10 @@ def _take_event(line: str, result: dict[str, Any], stream: _Stream, progress: Pr
     progress.observe(event)
     progress.write()
 
+    if event_type == "system" and event.get("subtype") == "init":
+        if isinstance(event.get("model"), str) and event["model"]:
+            result["model_used"] = event["model"]
+
     if event_type == "rate_limit_event":
         limit = usage_limit(event)
         if limit:
@@ -679,7 +689,8 @@ def run_task(
         "exit_code": None,
         "timed_out": False,
         "timeout_seconds": timeout_seconds,
-        "model": model,
+        "model": model,       # what was asked for; None means "Claude's default"
+        "model_used": None,   # what Claude says it ran on (set from its first event)
         "max_turns": max_turns,
         "read_only": read_only,
         "effort": effort,
@@ -783,6 +794,8 @@ def run_task(
         result["reader_error"] = stream.reader_error
 
     result.update(extract_usage(result.get("claude_result_event"), stream.result_events))
+    if not result.get("model_used"):  # no init event seen: the result names the models it billed
+        result["model_used"] = models_billed(result.get("claude_result_event"))
     result["result_count"] = len(stream.result_events)  # more than 1: the session woke up again
 
     _final_status(result, stream.timed_out)

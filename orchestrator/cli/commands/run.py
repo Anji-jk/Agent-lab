@@ -117,7 +117,9 @@ def run_run_plan(args: argparse.Namespace) -> int:
 
     def show(action: str, task_id: str, step) -> None:
         print(format_step(action, task_id, step), flush=True)
-        board.sync(starting=task_id if step is None else None)
+        # A task launched alongside others stays In progress until its own step ends.
+        (board.launched.add if step is None else board.launched.discard)(task_id)
+        board.sync()
 
     worktree_root = args.worktree_root or default_worktree_root()
     # Each task runs as its own process; its output goes to runs/<run>/run-plan-logs/.

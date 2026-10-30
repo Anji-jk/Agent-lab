@@ -59,7 +59,7 @@ def record(lab, task_id, *statuses, **extra):
 def test_a_new_run_puts_every_card_in_todo(lab):
     result, _, project = sync(lab)
     assert project.moves() == [(T1_ITEM, "o1"), (T2_ITEM, "o1"), (PARENT_ITEM, "o1")]
-    assert result.moved == ["T1 -> Todo", "T2 -> Todo", f"#{PARENT} -> Todo"]
+    assert result.moved == ["T1 (#101) -> Todo", "T2 (#102) -> Todo", f"parent #{PARENT} -> Todo"]
     assert all(c[2] == STATUS_FIELD for c in project.calls if c[0] == "move")
 
 
@@ -73,6 +73,27 @@ def test_the_task_run_plan_is_starting_goes_to_in_progress(lab):
     sync(lab)
     result, _, project = sync(lab, starting="T1")
     assert project.moves() == [(T1_ITEM, "o2"), (PARENT_ITEM, "o2")]
+
+
+def test_a_launched_task_without_a_record_yet_is_not_sent_back_to_todo(lab):
+    sync(lab)
+    sync(lab, starting="T1")  # T1 is launched; its process has not written its record yet
+    result, _, project = sync(lab, starting={"T1", "T2"})  # T2 is launched a moment later
+    assert (T1_ITEM, "o1") not in project.moves()
+    assert result.moved == ["T2 (#102) -> In progress"]  # T1 stays where it is
+
+
+def test_run_plan_keeps_every_launched_task_in_progress_until_its_step_ends(lab, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli.board, "sync_board",
+                        lambda *a, **k: seen.append(k["starting"]) or sy.Synced())
+    monkeypatch.setattr(cli.board, "_board_clients", lambda runs_dir: (FakeIssues(), FakeProject()))
+    follower = cli.board.BoardFollower(args_for(lab))
+    follower.launched.update({"T1", "T2"})
+    follower.sync()
+    follower.launched.discard("T1")
+    follower.sync()
+    assert seen == [{"T1", "T2"}, {"T2"}]
 
 
 def test_a_running_task_is_in_progress(lab):
@@ -130,7 +151,7 @@ def test_parent_place_between_tasks(states, place):
 def test_a_failed_move_is_reported_and_tried_again_next_time(lab):
     result, _, project = sync(lab, project=FakeProject(fail_moves={T1_ITEM: 1}))
     assert project.moves() == [(T2_ITEM, "o1"), (PARENT_ITEM, "o1")]  # the others still moved
-    assert result.problems and result.problems[0].startswith("T1: ")
+    assert result.problems and result.problems[0].startswith("T1 (#101): ")
     assert "could not update" in result.summary()
     _, _, project = sync(lab)
     assert project.moves() == [(T1_ITEM, "o1")]
@@ -189,7 +210,7 @@ def test_run_plan_puts_the_tasks_on_the_board_when_it_starts(tmp_path, monkeypat
     assert [c[0] for c in issues.calls].count("create") == 2
     out = capsys.readouterr().out
     assert "Board: put 2 task(s) on https://github.com/users/Anji-jk/projects/2" in out
-    assert "Board: moved T1 -> Todo, T2 -> Todo" in out
+    assert "Board: moved T1 (#101) -> Todo, T2 (#102) -> Todo" in out
     follower.sync(starting="T1")
     assert (T1_ITEM, "o2") in project.moves()
 
@@ -225,7 +246,7 @@ def test_board_sync_command(lab, monkeypatch, capsys):
     code = cli.main(["board", "sync", RUN, "--plans-dir", str(lab["plans"]),
                      "--runs-dir", str(lab["runs"])])
     assert code == cli.EXIT_OK
-    assert "Board: moved T1 -> Todo, T2 -> Todo, #7 -> Todo" in capsys.readouterr().out
+    assert "Board: moved T1 (#101) -> Todo, T2 (#102) -> Todo, parent #7 -> Todo" in capsys.readouterr().out
 
 
 

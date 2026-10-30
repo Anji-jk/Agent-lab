@@ -10,7 +10,8 @@ sync simply catches up.
 Where a task's card goes:
 
 * ``todo``         waiting, ready
-* ``in_progress``  building, testing, reviewing (and the task run-plan is starting)
+* ``in_progress``  building, testing, reviewing (and a task run-plan has launched whose
+                   process has not written its record yet: it stays here, never back in Todo)
 * ``attention``    failed, needs review, cancelled, interrupted, blocked
 * ``done``         done; its Issue is closed, so the parent's progress counts it
 
@@ -31,7 +32,7 @@ are about a second apart, as in publish: GitHub limits writes that come quickly.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,7 @@ def task_place(state: str) -> str:
     return TASK_PLACES.get(state, "todo")
 
 
-def parent_place(progress: PlanProgress, starting: str | None = None) -> str:
+def parent_place(progress: PlanProgress, starting: Collection[str] | str | None = None) -> str:
     if progress.state == "complete":
         return "done"
     if starting or progress.state == "running":
@@ -75,7 +76,8 @@ def parent_place(progress: PlanProgress, starting: str | None = None) -> str:
 
 @dataclass
 class Synced:
-    moved: list[str] = field(default_factory=list)      # "T2 -> In progress", "#4 -> Done"
+    # "T2 (#4) -> In progress", "parent #1 -> Done": a task and its Issue, or the plan's own Issue
+    moved: list[str] = field(default_factory=list)
     closed: list[int] = field(default_factory=list)     # task Issues closed
     commented: list[int] = field(default_factory=list)  # Issues that got a comment
     problems: list[str] = field(default_factory=list)   # what could not be done (the run goes on)
@@ -115,7 +117,7 @@ def sync_board(
     runs_dir: Path,
     issues: GitHubClient,
     project: ProjectClient,
-    starting: str | None = None,
+    starting: Collection[str] | str | None = None,
     get_command_line: CommandLine | None = None,
     runner_script: Path = runner_adapter.DEFAULT_RUNNER_SCRIPT,
     comments: bool = True,
@@ -128,6 +130,9 @@ def sync_board(
     tried again by the next sync.
     """
     result = Synced()
+    # Tasks run-plan has launched. Each starts as its own process and writes its record a moment
+    # later, so until then the records still say "not started": they must not send the card back.
+    launched = {starting} if isinstance(starting, str) else set(starting or ())
     board = load_board(runs_dir)
     columns: dict[str, dict[str, str]] = board["columns"]
     status_field = board.get("status_field_id")
@@ -178,9 +183,11 @@ def sync_board(
         entry = items.get(task.task_id)
         if not entry or "item_id" not in entry:
             continue  # not on the board yet: board publish puts it there
-        place = "in_progress" if task.task_id == starting else task_place(task.state)
-        changed = move(task.task_id, entry, place)
+        place = task_place(task.state)
+        if task.task_id in launched and place == "todo":
+            place = "in_progress"
         number = entry.get("issue_number")
+        changed = move(f"{task.task_id} (#{number})" if number else task.task_id, entry, place)
         if place == "done" and not entry.get("closed") and number:
             spaced()
             try:
@@ -211,7 +218,7 @@ def sync_board(
         except (GitHubAPIError, KeyError, TypeError) as exc:
             result.problems.append(f"#{number}'s card: {exc}")
             return result
-    move(f"#{number}", parent, parent_place(progress, starting))
+    move(f"parent #{number}", parent, parent_place(progress, launched))
     key = report_key(progress) if comments else None
     if key:  # the plan has finished or stopped: the run report goes on the parent Issue
         text = format_report(build_report(run_id, plans_dir=plans_dir, runs_dir=runs_dir,

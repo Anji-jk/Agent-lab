@@ -417,3 +417,37 @@ def test_the_runs_dir_given_by_the_orchestrator_is_where_the_files_go(tmp_path, 
                            timeout_seconds=10, runs_dir=given)
     assert (given / "given-dir" / "result.json").is_file()
     assert not (claude_runner.runs_root() / "given-dir").exists()
+
+
+# --- which model Claude actually ran on ---
+
+
+class _Progress:
+    def observe(self, event):
+        pass
+
+    def write(self, force=False):
+        pass
+
+
+def _take(event, result=None):
+    result = {"event_count": 0, "session_id": None, **(result or {})}
+    claude_runner._take_event(json.dumps(event), result, claude_runner._Stream(), _Progress())
+    return result
+
+
+def test_the_init_event_says_which_model_ran():
+    result = _take({"type": "system", "subtype": "init", "model": "claude-sonnet-5-5"},
+                   {"model": None, "model_used": None})
+    assert result["model_used"] == "claude-sonnet-5-5" and result["model"] is None
+
+
+def test_other_system_events_and_a_missing_model_leave_it_unset():
+    assert _take({"type": "system", "subtype": "status"}, {"model_used": None})["model_used"] is None
+    assert _take({"type": "system", "subtype": "init", "model": ""}, {"model_used": None})["model_used"] is None
+
+
+def test_without_an_init_event_the_models_billed_name_it():
+    event = {"modelUsage": {"claude-opus-5-5": {}, "claude-haiku-5-5": {}}}
+    assert claude_runner.models_billed(event) == "claude-haiku-5-5, claude-opus-5-5"
+    assert claude_runner.models_billed({}) is None and claude_runner.models_billed(None) is None

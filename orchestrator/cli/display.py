@@ -48,7 +48,9 @@ def display_task_plan(record: dict, path: Path) -> None:
     print(f"Repository:  {config['repository']}")
     print(f"Run ID:      {config['run_id']}")
     print(f"Branch:      {config['branch']} (from {config['base_ref']})")
-    print(f"Model:       {config['model'] or '(Claude default)'}")
+    asked = config["model"] or "(Claude default)"
+    ran = planner.get("model_used")
+    print(f"Model:       {ran + ' (Claude default)' if ran and not config['model'] else asked}")
     print(f"Timeout:     {config['timeout_seconds']}s")
     if record.get("summary"):
         print(f"\nSummary:     {record['summary']}")

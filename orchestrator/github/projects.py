@@ -21,6 +21,7 @@ It reads (5.1), adds Issues to the board (5.2) and moves cards between columns (
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +35,10 @@ from orchestrator.settings import PROJECT_TOKEN, load_settings
 PROJECT_TOKEN_VARIABLE = PROJECT_TOKEN
 API = "https://api.github.com"
 MAX_PAGES = 20
+# After GitHub says an Issue is already on the board, its card may not be in the list yet
+# (the board's own "add sub-issues" rule just put it there): look a few times, a moment apart.
+CARD_LOOKUPS = 5
+CARD_LOOKUP_WAIT_SECONDS = 2.0
 
 Opener = Callable[..., Any]  # urllib.request.urlopen, or a fake in tests
 
@@ -71,7 +76,8 @@ class ProjectClient:
 
     def __init__(self, owner: str, number: int, token: str | None = None,
                  token_variable: str = PROJECT_TOKEN_VARIABLE,
-                 timeout: float = 15.0, opener: Opener | None = None) -> None:
+                 timeout: float = 15.0, opener: Opener | None = None,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         if not owner or "/" in owner:
             raise ValueError("The project owner is a GitHub user name, such as Anji-jk.")
         if number < 1:
@@ -80,6 +86,7 @@ class ProjectClient:
         self.token, self.token_variable = token, token_variable
         self.timeout = timeout
         self._open = opener or urllib.request.urlopen
+        self._sleep = sleep
         self.base = f"{API}/users/{urllib.parse.quote(owner)}/projectsV2/{number}"
 
     def _get(self, path: str = "") -> Response:
@@ -169,7 +176,9 @@ class ProjectClient:
         """Put an Issue on the board (by its ``id``); returns the board item's id.
 
         GitHub refuses (HTTP 422) to add an Issue that is already on the board, as
-        your board's #4 showed live; then its existing card is looked up and used.
+        your board's #4 showed live; then its existing card is looked up and used. A board
+        rule that adds new sub-issues puts the card there a moment before this request, and
+        GitHub's list can lag behind, so the lookup is repeated a few times before giving up.
         """
         try:
             body = self._send("POST", "/items", {"type": "Issue", "id": issue_id})
@@ -177,6 +186,11 @@ class ProjectClient:
             if exc.code != 422:
                 raise
             existing = self.issue_item(issue_id)
+            for _ in range(CARD_LOOKUPS - 1):
+                if existing is not None:
+                    break
+                self._sleep(CARD_LOOKUP_WAIT_SECONDS)
+                existing = self.issue_item(issue_id)
             if existing is None:
                 raise GitHubAPIError(
                     f"GitHub refused to add Issue id {issue_id} to project {self.number} "

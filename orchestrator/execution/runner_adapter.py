@@ -43,6 +43,7 @@ RETAINED_FIELDS = (
     "timed_out",
     "error",
     "model",
+    "model_used",
     "session_id",
     "num_turns",
     "total_cost_usd",

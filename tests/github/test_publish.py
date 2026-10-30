@@ -212,6 +212,44 @@ def test_adding_to_the_board(answer):
     assert request.get_method() == "POST" and json.loads(request.data) == {"type": "Issue", "id": 9101}
 
 
+class AlreadyOnTheBoard:
+    """POST /items answers 422; the card shows in the board's list only from the n-th look."""
+
+    def __init__(self, visible_from: int | None):
+        self.looks, self.visible_from = 0, visible_from
+
+    def __call__(self, request, timeout=None):
+        if request.get_method() == "POST":
+            raise urllib.error.HTTPError(request.full_url, 422, "no", Message(), io.BytesIO(b"{}"))
+        self.looks += 1
+        shown = self.visible_from is not None and self.looks >= self.visible_from
+        body = [{"id": 777, "content_type": "Issue", "content": {"id": 9101}}] if shown else []
+        return Captured(json.dumps(body).encode())(request, timeout)
+
+
+def lagging_board(visible_from):
+    waits, opener = [], AlreadyOnTheBoard(visible_from)
+    return ProjectClient("Anji-jk", 2, token="classic", opener=opener, sleep=waits.append), waits, opener
+
+
+def test_a_card_the_list_does_not_show_yet_is_found_on_a_later_look():
+    project, waits, opener = lagging_board(visible_from=3)
+    assert project.add_issue(9101) == 777
+    assert opener.looks == 3 and len(waits) == 2  # waited between the looks, not after the last
+
+
+def test_a_card_that_is_already_listed_is_used_without_waiting():
+    project, waits, _ = lagging_board(visible_from=1)
+    assert project.add_issue(9101) == 777 and waits == []
+
+
+def test_a_card_that_never_shows_is_reported_after_a_few_looks():
+    project, waits, opener = lagging_board(visible_from=None)
+    with pytest.raises(GitHubAPIError, match="not on the board either"):
+        project.add_issue(9101)
+    assert opener.looks == 5 and len(waits) == 4
+
+
 def test_a_board_write_without_a_token_is_refused_before_any_request():
     captured = Captured()
     with pytest.raises(GitHubAPIError, match="no token is set"):

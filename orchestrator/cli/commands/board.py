@@ -56,6 +56,7 @@ class BoardFollower:
 
     def __init__(self, args: argparse.Namespace):
         self.args, self.clients = args, None
+        self.launched: set[str] = set()  # tasks started by this run-plan and not finished yet
         if getattr(args, "no_board", False) or not board_path(args.runs_dir).exists():
             return
         try:
@@ -85,10 +86,11 @@ class BoardFollower:
     def sync(self, starting: str | None = None) -> None:
         if self.clients is None:
             return
+        running = self.launched | ({starting} if starting else set())
         try:
             synced = sync_board(self.args.run_id, plans_dir=self.args.plans_dir,
                                 runs_dir=self.args.runs_dir, issues=self.clients[0],
-                                project=self.clients[1], starting=starting)
+                                project=self.clients[1], starting=running)
         except (ExecutionRefused, GitHubAPIError) as exc:
             self._warn(f"sync failed: {exc}")
             return

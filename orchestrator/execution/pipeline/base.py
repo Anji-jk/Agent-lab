@@ -22,7 +22,7 @@ from orchestrator.core.attempts import agent_run_id as attempt_agent_run_id
 
 AGENT_METRIC_FIELDS = (
     "status", "duration_seconds", "total_cost_usd", "input_tokens",
-    "output_tokens", "num_turns", "model", "session_id",
+    "output_tokens", "num_turns", "model", "model_used", "session_id",
 )
 TEST_DIRS = (f"{TEST_DIR}/",)
 

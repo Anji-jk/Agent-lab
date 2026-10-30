@@ -43,7 +43,7 @@ from orchestrator.execution.worktrees import run_git
 from orchestrator.prompts.loader import render
 
 DEFAULT_PLANNING_MAX_TURNS = 10
-
+DEFAULT_PLANNER_MODEL = "opus"
 # The runner passes the prompt as a command-line argument, and Windows caps
 # a command line at about 32k characters. Keep well inside that.
 MAX_DESCRIPTION_CHARS = 12_000
@@ -57,6 +57,7 @@ PLANNER_METRIC_FIELDS = (
     "output_tokens",
     "num_turns",
     "model",
+    "model_used",
     "session_id",
 )
 
