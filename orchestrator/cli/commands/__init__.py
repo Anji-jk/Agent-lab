@@ -16,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from orchestrator.cli.commands import board, budget, monitor, plan, run, setup, task
+from orchestrator.cli.commands import board, budget, jira, monitor, plan, run, setup, task
 from orchestrator.cli.display import display_task  # noqa: F401  (re-exported)
 from orchestrator.cli.exit_codes import (  # noqa: F401  (re-exported)
     EXIT_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_PLANNING_FAILED, EXIT_REFUSED, EXIT_TASK_FAILED,
@@ -28,6 +28,7 @@ from orchestrator.core.runner_paths import PROJECT_ROOT  # noqa: F401  (re-expor
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution.worktrees import WorktreeError
 from orchestrator.github.client import GitHubAPIError
+from orchestrator.jira.client import JiraAPIError
 from orchestrator.planning.ai_planner import PlanningError
 from orchestrator.records.run_registry import RunRegistryError
 from orchestrator.settings import load_settings, use_project
@@ -45,6 +46,7 @@ HANDLERS = {
     "report": (task, "run_report"),
     "budget": (budget, "run_budget"),
     "board": (board, "run_board"),
+    "jira": (jira, "run_jira"),
     "status": (monitor, "run_status_command"),
     "dashboard": (monitor, "run_dashboard"),
 }
@@ -118,6 +120,6 @@ def _main(argv: Sequence[str] | None) -> int:
     except PlanningError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_PLANNING_FAILED
-    except (GitHubAPIError, WorktreeError, RunRegistryError, FileExistsError) as exc:
+    except (GitHubAPIError, JiraAPIError, WorktreeError, RunRegistryError, FileExistsError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_ERROR

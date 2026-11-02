@@ -51,7 +51,7 @@ def test_every_setting_can_come_from_the_file(tmp_path):
     assert {n for n in st.SETTING_NAMES} == {
         "GITHUB_TOKEN", "AGENT_LAB_PROJECT_TOKEN", "AGENT_LAB_REPOSITORY", "AGENT_LAB_PYTHON",
         "AGENT_LAB_WORKTREE_ROOT", "AGENT_LAB_AGENT_RUNS_DIR", "AGENT_LAB_MAX_PARALLEL",
-        "AGENT_LAB_TEST_TIMEOUT"}
+        "AGENT_LAB_TEST_TIMEOUT", "JIRA_EMAIL", "JIRA_API_TOKEN"}
 
 
 def test_quotes_spaces_and_comments(tmp_path):

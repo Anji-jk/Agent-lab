@@ -1,7 +1,7 @@
 """R7: each layer of the orchestrator may import only the layers below it (or its own).
 
     1  core, settings, errors, records
-    2  github (the plain client), planning (plan model, profiles, safety screen), prompts,
+    2  github and jira (the plain clients), planning (plan model, profiles, safety screen), prompts,
        and the readers of what agents did: monitoring.progress, monitoring.event_feed,
        plus execution.worktrees (plain Git helpers that import only layer 1)
     3  execution, and the AI planner (it runs an agent)
@@ -21,7 +21,7 @@ ROOT = Path(orchestrator.__file__).resolve().parent
 
 PACKAGE_LAYERS = {
     "core": 1, "settings": 1, "errors": 1, "records": 1,
-    "github": 2, "planning": 2, "prompts": 2,
+    "github": 2, "jira": 2, "planning": 2, "prompts": 2,
     "execution": 3,
     "scheduling": 4,
     "cli": 5, "monitoring": 5,

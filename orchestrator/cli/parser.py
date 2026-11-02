@@ -174,6 +174,34 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
     sync_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
+    jira_parser = subparsers.add_parser(
+        "jira", help="The project's Jira space (optional; the GitHub board is not affected).",
+    )
+    jira_commands = jira_parser.add_subparsers(dest="jira_command", required=True)
+    jira_connect = jira_commands.add_parser(
+        "connect",
+        help="Read the Jira space and board, check them, and save what later steps need. "
+             "Writes nothing to Jira.",
+    )
+    jira_connect.add_argument("--project", default=None, metavar="KEY",
+                              help="The Jira space's key (default: jira_project in .agent-lab.toml).")
+    jira_connect.add_argument("--url", default=None,
+                              help="The Jira site, https://<site>.atlassian.net "
+                                   "(default: jira_url in .agent-lab.toml).")
+    jira_connect.add_argument("--board", type=int, default=None, metavar="ID",
+                              help="The board to use, when the space has more than one.")
+    for place, what in (("todo", "not started"), ("in-progress", "being built"),
+                        ("in-review", "waiting for a person (In Review)"),
+                        ("done", "done on its run branch")):
+        jira_connect.add_argument(f"--{place}", metavar="STATUS", default=None,
+                                  help=f"The status for items that are {what}, if its name "
+                                       "is not recognised.")
+    for level in ("epic", "story", "subtask", "task", "bug"):
+        jira_connect.add_argument(f"--{level}-type", metavar="TYPE", default=None,
+                                  help=f"The Jira work type for {level}s, if its name is not "
+                                       "recognised.")
+    jira_connect.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+
     report_parser = subparsers.add_parser(
         "report",
         help="Summarise a run: its branch, cost, time, and each task's result. No AI calls.",

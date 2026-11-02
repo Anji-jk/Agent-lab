@@ -44,10 +44,12 @@ WORKTREE_ROOT = "AGENT_LAB_WORKTREE_ROOT"
 AGENT_RUNS_DIR = "AGENT_LAB_AGENT_RUNS_DIR"
 MAX_PARALLEL = "AGENT_LAB_MAX_PARALLEL"
 TEST_TIMEOUT = "AGENT_LAB_TEST_TIMEOUT"
+JIRA_EMAIL = "JIRA_EMAIL"
+JIRA_API_TOKEN = "JIRA_API_TOKEN"
 
 # Every name that may come from .env. (AGENT_LAB_ENV_FILE says where .env is, so it cannot.)
 SETTING_NAMES = (GITHUB_TOKEN, PROJECT_TOKEN, REPOSITORY, PYTHON, WORKTREE_ROOT, AGENT_RUNS_DIR,
-                 MAX_PARALLEL, TEST_TIMEOUT)
+                 MAX_PARALLEL, TEST_TIMEOUT, JIRA_EMAIL, JIRA_API_TOKEN)
 
 DEFAULT_MAX_PARALLEL = 3
 MAX_PARALLEL_LIMIT = 8
@@ -64,6 +66,8 @@ class Settings:
     agent_runs_dir: Path | None = None
     max_parallel: int = DEFAULT_MAX_PARALLEL
     test_timeout: int | None = None  # seconds; None means the project's setting, then the default
+    jira_email: str | None = None  # the Agent Lab user's Atlassian account email
+    jira_api_token: str | None = None  # its API token; never printed, never given to an agent
 
     def board_token(self) -> tuple[str | None, str]:
         """(token, the variable it came from) for the Project board."""
@@ -72,6 +76,17 @@ class Settings:
         if self.github_token:
             return self.github_token, GITHUB_TOKEN
         return None, PROJECT_TOKEN
+
+    def jira_credentials(self) -> tuple[str, str]:
+        """(email, API token) for Jira Cloud, or a refusal that names what is missing."""
+        missing = [name for name, value in ((JIRA_EMAIL, self.jira_email),
+                                            (JIRA_API_TOKEN, self.jira_api_token)) if not value]
+        if missing:
+            raise ExecutionRefused(
+                f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} not set. Put "
+                "them in the project's .agent-lab/.env (or the orchestrator's .env to share "
+                "them between projects).")
+        return self.jira_email, self.jira_api_token  # type: ignore[return-value]
 
 
 def _value(raw: str) -> str:
@@ -135,6 +150,9 @@ def _build(values: Mapping[str, str]) -> Settings:
     if repository is not None and repository.count("/") != 1:
         raise ExecutionRefused(f"{REPOSITORY} is {repository!r}; it must be OWNER/REPO.")
     root, runs = get(WORKTREE_ROOT), get(AGENT_RUNS_DIR)
+    email = get(JIRA_EMAIL)
+    if email is not None and "@" not in email:
+        raise ExecutionRefused(f"{JIRA_EMAIL} must be the email address of the Jira account.")
     return Settings(
         github_token=get(GITHUB_TOKEN),
         project_token=get(PROJECT_TOKEN),
@@ -146,6 +164,8 @@ def _build(values: Mapping[str, str]) -> Settings:
             MAX_PARALLEL, parallel, 1, MAX_PARALLEL_LIMIT,
             " (how many tasks run together). Fix it in .env or the window, or use --one-at-a-time."),
         test_timeout=seconds,
+        jira_email=email,
+        jira_api_token=get(JIRA_API_TOKEN),
     )
 
 

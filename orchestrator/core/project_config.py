@@ -9,6 +9,8 @@ shown to the agents) is read from this file. A missing file means the defaults.
     test_timeout = 1200                                # seconds, 60 to 86400
     test_example = "tests/test_calc.py tests/test_io.py"
     repository = "OWNER/REPO"                          # its GitHub repository
+    jira_url = "https://yourteam.atlassian.net"        # optional: its Jira Cloud site
+    jira_project = "LEDG"                              # optional: its Jira space (project key)
 
     [profiles.small]                                   # optional: change a task size
     model = "opus"                                     # (config/profiles.toml is the default)
@@ -16,6 +18,7 @@ shown to the agents) is read from this file. A missing file means the defaults.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +29,9 @@ CONFIG_FILE_NAME = ".agent-lab.toml"
 DEFAULT_TEST_EXAMPLE = "tests/test_example.py"
 TIMEOUT_RANGE = (60, 86400)
 KNOWN_KEYS = frozenset({"test_command", "python", "test_timeout", "test_example", "repository",
-                        "profiles"})
+                        "profiles", "jira_url", "jira_project"})
+# A Jira project key: a capital letter, then capitals, digits or _ (Jira's default rule), 2-10 long.
+JIRA_KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{1,9}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +42,8 @@ class ProjectConfig:
     test_example: str = DEFAULT_TEST_EXAMPLE
     repository: str | None = None
     profiles: dict[str, object] | None = None  # checked by planning/profiles.py, which knows them
+    jira_url: str | None = None  # https://<site>.atlassian.net, no trailing slash
+    jira_project: str | None = None  # the Jira project (space) key, such as LEDG
 
 
 def _bad(name: str, why: str) -> ExecutionRefused:
@@ -74,6 +81,17 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
     profiles = data.get("profiles")
     if profiles is not None and not isinstance(profiles, dict):
         raise _bad("profiles", "must be a table, such as [profiles.small]")
+    jira_url = data.get("jira_url")
+    if jira_url is not None:
+        if not (isinstance(jira_url, str) and jira_url.strip().startswith("https://")
+                and len(jira_url.strip()) > len("https://")):
+            raise _bad("jira_url", "must be the site's address, such as https://yourteam.atlassian.net")
+        jira_url = jira_url.strip().rstrip("/")
+    jira_project = data.get("jira_project")
+    if jira_project is not None and not (
+        isinstance(jira_project, str) and JIRA_KEY_PATTERN.fullmatch(jira_project.strip())
+    ):
+        raise _bad("jira_project", "must be a project key in capitals, such as LEDG")
     return ProjectConfig(
         tuple(command) if command else None,  # type: ignore[arg-type]
         python.strip() if isinstance(python, str) else None,
@@ -81,6 +99,8 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
         example.strip(),
         repository.strip() if isinstance(repository, str) else None,
         profiles,  # type: ignore[arg-type]
+        jira_url,  # type: ignore[arg-type]
+        jira_project.strip() if isinstance(jira_project, str) else None,
     )
 
 
