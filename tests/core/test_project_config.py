@@ -57,3 +57,27 @@ def test_the_timeout_prefers_the_machine_then_the_project(monkeypatch):
     assert tr.test_timeout_seconds(900) == 900
     monkeypatch.setenv(tr.TEST_TIMEOUT_VARIABLE, "300")
     assert tr.test_timeout_seconds(900) == 300
+
+
+@pytest.mark.parametrize("value, expected", [
+    ('"docs"', "docs"),
+    ('"docs/"', "docs"),
+    ('"./docs"', "docs"),
+    ('"project\\\\docs\\\\"', "project/docs"),
+    ('" project/docs "', "project/docs"),
+])
+def test_docs_dir_is_read_with_forward_slashes(tmp_path, value, expected):
+    config = load_project_config(write(tmp_path, f"docs_dir = {value}\n"))
+    assert getattr(config, "docs_dir") == expected
+
+
+def test_docs_dir_is_optional(tmp_path):
+    config = load_project_config(write(tmp_path, 'repository = "me/ledger"\n'))
+    assert getattr(config, "docs_dir") is None
+
+
+@pytest.mark.parametrize("value", ['""', '"."', '"./"', '"/docs"', '"C:/docs"', '"C:docs"',
+                                   '"~/docs"', '"../docs"', '"docs/../.."', "3"])
+def test_docs_dir_outside_the_project_is_refused(tmp_path, value):
+    with pytest.raises(ExecutionRefused, match="docs_dir must be a folder inside the project"):
+        load_project_config(write(tmp_path, f"docs_dir = {value}\n"))

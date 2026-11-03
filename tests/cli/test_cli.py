@@ -58,8 +58,8 @@ def test_help_lists_commands(capsys):
 
     out = capsys.readouterr().out
     assert info.value.code == 0
-    for command in ("init", "issue", "ai-plan", "show-plan", "run-plan", "run-task", "status",
-                    "dashboard", "budget", "cancel", "report", "show-task", "board"):
+    for command in ("init", "check", "issue", "ai-plan", "show-plan", "run-plan", "run-task",
+                    "status", "dashboard", "budget", "cancel", "report", "show-task", "board"):
         assert command in out
     assert "exit codes" in out
 
@@ -456,6 +456,26 @@ def test_init_sets_up_a_project_and_only_writes_what_is_missing(git_repo, monkey
     assert cli.main(["init"]) == cli.EXIT_OK
     assert "nothing to do" in capsys.readouterr().out
     assert (data / ".env").read_text(encoding="utf-8") == "GITHUB_TOKEN=mine\n"
+
+
+def test_check_reports_gaps_but_never_stops_anything(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    assert cli.main(["check"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "--  no CLAUDE.md" in out and "--  no docs folder" in out
+    assert "2 things missing (--). Runs still work" in out
+    assert not (git_repo / ".agent-lab").exists()  # check writes nothing
+
+
+def test_check_on_a_complete_project(git_repo, capsys):
+    (git_repo / "docs").mkdir()
+    (git_repo / ".agent-lab.toml").write_text('docs_dir = "docs"\n', encoding="utf-8")
+    (git_repo / "CLAUDE.md").write_text(
+        "## Project structure\n- docs/: feature docs\n## Commands\nx\n## Rules\nx\n",
+        encoding="utf-8")
+    assert cli.main(["check", "--repo-path", str(git_repo)]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "--" not in out and "Nothing missing." in out
 
 
 def test_init_is_refused_in_the_orchestrators_own_repository(monkeypatch, capsys):

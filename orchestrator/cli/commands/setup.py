@@ -1,4 +1,7 @@
-"""init: get a project ready for Agent Lab. Writes only files that are missing."""
+"""init and check: get a project ready for Agent Lab, and see what it gives the agents.
+
+init writes only files that are missing; check writes nothing and never stops anything.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,8 @@ import argparse
 
 from orchestrator.cli.exit_codes import EXIT_OK
 from orchestrator.core.project import Project, ensure_data_dir, repository_from_origin
-from orchestrator.core.project_config import CONFIG_FILE_NAME
+from orchestrator.core.project_check import check_project, format_project_check
+from orchestrator.core.project_config import CONFIG_FILE_NAME, load_project_config
 from orchestrator.errors import ExecutionRefused
 from orchestrator.settings import active_project
 
@@ -29,6 +33,7 @@ repository = "{repository}"
 # python = "C:/path/to/python.exe"                  # default: this project's .venv
 # test_timeout = 600                                # seconds, 60 to 86400
 # test_example = "tests/test_example.py"            # shown to the agents as an example
+# docs_dir = "docs"                                 # optional: the folder of feature docs
 
 # Change a task size for this project only (config/profiles.toml in Agent Lab is the default):
 # [profiles.small]
@@ -66,4 +71,18 @@ def run_init(args: argparse.Namespace) -> int:
     print(f"Project: {project.root}")
     for line in init_project(project):
         print("  " + line)
+    return EXIT_OK
+
+
+def run_check(args: argparse.Namespace) -> int:
+    """What the project's CLAUDE.md and docs folder give the agents. Never stops anything."""
+    project = active_project()
+    if project is None:  # main() finds it before any command runs
+        raise ExecutionRefused("No project found. Run check in the project's folder.")
+    result = check_project(project.root, load_project_config(project.root))
+    print(format_project_check(result))
+    gaps = len(result.gaps)
+    print("\nNothing missing." if not gaps else
+          f"\n{gaps} thing{'s' if gaps > 1 else ''} missing (--). Runs still work; filling "
+          "them in helps the agents find their way.")
     return EXIT_OK

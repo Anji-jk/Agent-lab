@@ -36,6 +36,7 @@ from orchestrator.settings import load_settings, use_project
 # command -> (module, handler); the handler is looked up when the command runs.
 HANDLERS = {
     "init": (setup, "run_init"),
+    "check": (setup, "run_check"),
     "issue": (plan, "run_issue"),
     "ai-plan": (plan, "run_ai_plan"),
     "show-plan": (plan, "run_show_plan"),
@@ -55,7 +56,7 @@ HANDLERS = {
 # Commands that make worktrees in, or plan from, the project's checkout.
 NEEDS_CHECKOUT = frozenset({"ai-plan", "run-task", "run-plan"})
 # Commands that need a project but make its folder themselves.
-NEEDS_PROJECT = NEEDS_CHECKOUT | {"init"}
+NEEDS_PROJECT = NEEDS_CHECKOUT | {"init", "check"}
 
 
 def settle_project(args: argparse.Namespace) -> Project | None:

@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Get the project ready: its .agent-lab/ folder, a .env for its tokens and an "
              ".agent-lab.toml. Writes only what is missing; no GitHub or AI calls.",
     )
+    subparsers.add_parser(
+        "check",
+        help="Show what the project gives the agents: its CLAUDE.md (structure, commands, rules) "
+             "and its docs folder (docs_dir in .agent-lab.toml). Only reports; writes nothing.",
+    )
 
     issue_parser = subparsers.add_parser(
         "issue",
