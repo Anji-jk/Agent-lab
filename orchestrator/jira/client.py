@@ -1,6 +1,6 @@
 """Minimal Jira Cloud client using Python's standard library.
 
-It only reads for now: ``jira connect`` needs nothing else. Authentication is the Agent Lab
+It only reads for now: ``jira connect`` and ``jira story`` need nothing else. Authentication is the Agent Lab
 user's email and API token (HTTP basic auth, as Jira Cloud expects). Neither ever appears in
 an error message, and nothing here prints or logs them.
 """
@@ -119,6 +119,30 @@ class JiraClient:
             "projectKey": key, "permissions": ",".join(permissions)}), "the permissions")
         found = data.get("permissions") or {}
         return {name: bool((found.get(name) or {}).get("havePermission")) for name in permissions}
+
+    # --- what reading a story needs ------------------------------------------------------
+
+    def issue(self, key: str, fields: tuple[str, ...]) -> dict[str, Any]:
+        """One work item with only these fields."""
+        return self._object(self.get(f"/rest/api/3/issue/{urllib.parse.quote(key)}",
+                                     {"fields": ",".join(fields)}), f"work item {key}")
+
+    def search(self, jql: str, fields: tuple[str, ...], *, page_size: int = 100,
+               max_items: int = 500) -> list[dict[str, Any]]:
+        """Every work item a JQL query finds, page by page (Jira's /search/jql)."""
+        found: list[dict[str, Any]] = []
+        token: str | None = None
+        while len(found) < max_items:
+            params: dict[str, Any] = {"jql": jql, "fields": ",".join(fields),
+                                      "maxResults": page_size}
+            if token:
+                params["nextPageToken"] = token
+            page = self._object(self.get("/rest/api/3/search/jql", params), "the search")
+            found += [item for item in page.get("issues") or [] if isinstance(item, dict)]
+            token = page.get("nextPageToken")
+            if not token or page.get("isLast"):
+                break
+        return found[:max_items]
 
     @staticmethod
     def _object(data: Any, what: str) -> dict[str, Any]:

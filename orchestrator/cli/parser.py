@@ -206,6 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
                                   help=f"The Jira work type for {level}s, if its name is not "
                                        "recognised.")
     jira_connect.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+    jira_story = jira_commands.add_parser(
+        "story",
+        help="Show a Jira story with its epic and sub-tasks (acceptance criteria, what blocks "
+             "what) as a story run will read them. Reads only; saves nothing.",
+    )
+    jira_story.add_argument("key", help="The story's key, such as SKM-9.")
+    jira_story.add_argument("--json", action="store_true",
+                            help="Print everything read, as JSON, instead of the summary.")
 
     report_parser = subparsers.add_parser(
         "report",
