@@ -17,9 +17,14 @@ from orchestrator.settings import active_project
 ENV_TEMPLATE = """\
 # This project's own Agent Lab settings. Git ignores this folder, so nothing here is committed.
 # A value set here wins over the orchestrator's .env; a variable set in the shell wins over both.
-# Leave a line empty to use the orchestrator's value.
+# Leave a line empty to use the orchestrator's value. Agents never see any of these.
 
-# GitHub token for this project's Issues and comments.
+# Jira: needed for story runs (jira commands). The account's email, and an API token made at
+# id.atlassian.com (not the password).
+JIRA_EMAIL=
+JIRA_API_TOKEN=
+
+# GitHub, optional for story runs: Issue runs read Issues with it, and the GitHub board uses it.
 GITHUB_TOKEN=
 # GitHub token for this project's board (needs the project scope; GITHUB_TOKEN if empty).
 AGENT_LAB_PROJECT_TOKEN=
@@ -34,6 +39,10 @@ repository = "{repository}"
 # test_timeout = 600                                # seconds, 60 to 86400
 # test_example = "tests/test_example.py"            # shown to the agents as an example
 # docs_dir = "docs"                                 # optional: the folder of feature docs
+
+# Jira, for story runs (its email and API token go in .agent-lab/.env):
+# jira_url = "https://yourteam.atlassian.net"
+# jira_project = "KEY"                              # the Jira space's key, such as SKM
 
 # Change a task size for this project only (config/profiles.toml in Agent Lab is the default):
 # [profiles.small]

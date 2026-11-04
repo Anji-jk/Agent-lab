@@ -445,8 +445,11 @@ def test_init_sets_up_a_project_and_only_writes_what_is_missing(git_repo, monkey
     assert cli.main(["init"]) == cli.EXIT_OK
     out = capsys.readouterr().out
     data = git_repo / ".agent-lab"
-    assert "GITHUB_TOKEN=" in (data / ".env").read_text(encoding="utf-8")
-    assert 'repository = "Anji-jk/Agent-lab"' in (git_repo / ".agent-lab.toml").read_text(encoding="utf-8")
+    env = (data / ".env").read_text(encoding="utf-8")
+    config = (git_repo / ".agent-lab.toml").read_text(encoding="utf-8")
+    assert "GITHUB_TOKEN=" in env and "JIRA_EMAIL=" in env and "JIRA_API_TOKEN=" in env
+    assert "# jira_project = " in config
+    assert 'repository = "Anji-jk/Agent-lab"' in config
     assert ".agent-lab/.env" in out and "commit it" in out
     # the toml is the only new thing Git sees: the folder and its .env are ignored
     assert subprocess.run(["git", "-C", str(git_repo), "status", "--porcelain"], capture_output=True,
