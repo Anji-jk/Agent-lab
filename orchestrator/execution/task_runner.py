@@ -35,6 +35,7 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.planning.profiles import RoleSettings, profile_for, role_settings
 from orchestrator.execution.roles import BUILDER, REVIEWER, ROLE_NAMES, TESTER
 from orchestrator.records.run_registry import RunRegistryError, locked, run_directory, utc_now
+from orchestrator.records.project_db import try_refresh_run
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.task_events import NullLog, TaskLog
 from orchestrator.records.task_registry import (
@@ -49,6 +50,7 @@ from orchestrator.execution.pipeline.finish import commit_message
 from orchestrator.execution.pipeline.review import ReviewStage
 from orchestrator.execution.pipeline.test_stage import TestingStage
 from orchestrator.core.project_config import DEFAULT_TEST_EXAMPLE, load_project_config
+from orchestrator.core.runner_paths import agent_runs_root
 from orchestrator.execution.worktrees import WorktreeError, create_worktree
 from orchestrator.settings import TEST_TIMEOUT, load_settings
 
@@ -385,9 +387,14 @@ def run_task(
     except Exception as exc:
         log.emit("worktree_failed", error=str(exc))
         log.emit("task_finished", status="failed", cost_usd=0)
-        return update_task(runs_dir, run_id, task_id, {
+        record = update_task(runs_dir, run_id, task_id, {
             "status": "failed", "reasons": [f"The worktree could not be created: {exc}"],
         })
+        problem = try_refresh_run(runs_dir, run_id, agent_runs_root(Path(runner_script)),
+                                  plans_dir)
+        if problem:
+            log.emit("database_not_updated", error=problem)
+        return record
     update_task(runs_dir, run_id, task_id, {"branch": branch, "worktree_path": str(worktree)})
     log.emit("worktree_created", branch=branch, path=str(worktree))
 
@@ -438,7 +445,7 @@ def run_task(
     if current == "pending":
         status = "failed"
     log.emit("task_finished", status=status, cost_usd=_total_cost(pipeline.agents))
-    return update_task(runs_dir, run_id, task_id, {
+    record = update_task(runs_dir, run_id, task_id, {
         "status": status,
         "reasons": reasons,
         "commit": commit,
@@ -452,3 +459,8 @@ def run_task(
         "findings": {k: getattr(pipeline.findings, k) for k in pipeline.findings.__dataclass_fields__},
         "cost_usd": _total_cost(pipeline.agents),
     })
+    problem = try_refresh_run(runs_dir, run_id, agent_runs_root(Path(runner_script)),
+                              plans_dir)
+    if problem:
+        log.emit("database_not_updated", error=problem)
+    return record

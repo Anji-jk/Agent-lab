@@ -16,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from orchestrator.cli.commands import board, budget, jira, monitor, plan, run, setup, task
+from orchestrator.cli.commands import board, budget, db, jira, monitor, plan, run, setup, task
 from orchestrator.cli.display import display_task  # noqa: F401  (re-exported)
 from orchestrator.cli.exit_codes import (  # noqa: F401  (re-exported)
     EXIT_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_PLANNING_FAILED, EXIT_REFUSED, EXIT_TASK_FAILED,
@@ -48,6 +48,7 @@ HANDLERS = {
     "budget": (budget, "run_budget"),
     "board": (board, "run_board"),
     "jira": (jira, "run_jira"),
+    "db": (db, "run_db"),
     "status": (monitor, "run_status_command"),
     "dashboard": (monitor, "run_dashboard"),
 }

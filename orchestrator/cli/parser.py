@@ -179,6 +179,18 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
     sync_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
+    db_parser = subparsers.add_parser(
+        "db", help="The project's database (.agent-lab/agentlab.db): an index of the run files, "
+                   "which stay as they are.",
+    )
+    db_commands = db_parser.add_subparsers(dest="db_command", required=True)
+    for name, text in (("rebuild", "Delete the database and fill it again from every run's "
+                                   "files. Safe at any time; the files are only read."),
+                       ("summary", "What the database holds: counts, the latest runs, and the "
+                                   "tasks that did not finish.")):
+        db_command = db_commands.add_parser(name, help=text)
+        db_command.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+
     jira_parser = subparsers.add_parser(
         "jira", help="The project's Jira space (optional; the GitHub board is not affected).",
     )
