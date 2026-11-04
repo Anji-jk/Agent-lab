@@ -1,13 +1,15 @@
-"""jira connect and jira story: the project's Jira space. Both only read from Jira."""
+"""jira connect, jira story and jira check: the project's Jira space. All only read from Jira."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from orchestrator.cli.exit_codes import EXIT_OK, EXIT_REFUSED
 from orchestrator.core.project_config import CONFIG_FILE_NAME, load_project_config
 from orchestrator.errors import ExecutionRefused
+from orchestrator.execution.story_check import format_story_check, run_story_checks
 from orchestrator.jira.client import JiraClient
 from orchestrator.jira.connect import connect_jira, format_connection, save_jira
 from orchestrator.jira.story import format_story, read_story
@@ -31,6 +33,8 @@ def _site(args: argparse.Namespace) -> tuple[JiraClient, str]:
 def run_jira(args: argparse.Namespace) -> int:
     if args.jira_command == "story":
         return _story(args)
+    if args.jira_command == "check":
+        return _check(args)
     return _connect(args)
 
 
@@ -61,3 +65,18 @@ def _story(args: argparse.Namespace) -> int:
         print(format_story(story))
         print("\nNothing was written to Jira or saved.")
     return EXIT_OK
+
+
+def _check(args: argparse.Namespace) -> int:
+    """The checks before planning a story. Refused (exit 4) when one fails; writes nothing."""
+    if not args.repo_path:
+        raise ExecutionRefused("No project found. Run jira check in the project's folder.")
+    client, project = _site(args)
+    story = read_story(client, args.key, project)
+    print(f"Reading the project and Git{'' if args.skip_tests else ', then running its tests'}"
+          "...", file=sys.stderr)
+    result = run_story_checks(story, args.repo_path, load_project_config(args.repo_path),
+                              base_ref=args.base, run_tests=not args.skip_tests)
+    print(format_story_check(result))
+    print("\nNothing was written to Jira or saved.")
+    return EXIT_OK if result.ready else EXIT_REFUSED

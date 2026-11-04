@@ -214,6 +214,16 @@ def build_parser() -> argparse.ArgumentParser:
     jira_story.add_argument("key", help="The story's key, such as SKM-9.")
     jira_story.add_argument("--json", action="store_true",
                             help="Print everything read, as JSON, instead of the summary.")
+    jira_check = jira_commands.add_parser(
+        "check",
+        help="The checks before a story is planned: the story (open sub-tasks, acceptance "
+             "criteria), the checkout (clean, on the base branch), the project (CLAUDE.md, docs) "
+             "and its tests on the base branch. Reads only; writes nothing.",
+    )
+    jira_check.add_argument("key", help="The story's key, such as KAN-10.")
+    jira_check.add_argument("--base", default="main", help="The branch the run starts from.")
+    jira_check.add_argument("--skip-tests", action="store_true",
+                            help="Do not run the project's tests (they can be slow).")
 
     report_parser = subparsers.add_parser(
         "report",
