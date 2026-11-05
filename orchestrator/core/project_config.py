@@ -12,6 +12,7 @@ shown to the agents) is read from this file. A missing file means the defaults.
     jira_url = "https://yourteam.atlassian.net"        # optional: its Jira Cloud site
     jira_project = "LEDG"                              # optional: its Jira space (project key)
     docs_dir = "docs"                                  # optional: its folder of feature docs
+    base_branch = "dev"                                # optional: the branch runs start from
 
     [profiles.small]                                   # optional: change a task size
     model = "opus"                                     # (config/profiles.toml is the default)
@@ -30,7 +31,10 @@ CONFIG_FILE_NAME = ".agent-lab.toml"
 DEFAULT_TEST_EXAMPLE = "tests/test_example.py"
 TIMEOUT_RANGE = (60, 86400)
 KNOWN_KEYS = frozenset({"test_command", "python", "test_timeout", "test_example", "repository",
-                        "profiles", "jira_url", "jira_project", "docs_dir"})
+                        "profiles", "jira_url", "jira_project", "docs_dir", "base_branch"})
+DEFAULT_BASE_BRANCH = "main"
+# A branch name: it is given to Git, so no leading "-" and no spaces (checked again by Git).
+BRANCH_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 # A Jira project key: a capital letter, then capitals, digits or _ (Jira's default rule), 2-10 long.
 JIRA_KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{1,9}")
 
@@ -46,6 +50,7 @@ class ProjectConfig:
     jira_url: str | None = None  # https://<site>.atlassian.net, no trailing slash
     jira_project: str | None = None  # the Jira project (space) key, such as LEDG
     docs_dir: str | None = None  # the feature docs folder, relative to the root, with / only
+    base_branch: str | None = None  # the branch plans and runs start from; None means main
 
 
 def _bad(name: str, why: str) -> ExecutionRefused:
@@ -113,6 +118,12 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
     ):
         raise _bad("jira_project", "must be a project key in capitals, such as LEDG")
     docs_dir = _docs_dir(data.get("docs_dir"))
+    base_branch = data.get("base_branch")
+    if base_branch is not None and not (
+        isinstance(base_branch, str) and BRANCH_PATTERN.fullmatch(base_branch.strip())
+        and ".." not in base_branch
+    ):
+        raise _bad("base_branch", "must be a branch name, such as \"dev\"")
     return ProjectConfig(
         tuple(command) if command else None,  # type: ignore[arg-type]
         python.strip() if isinstance(python, str) else None,
@@ -123,6 +134,7 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
         jira_url,  # type: ignore[arg-type]
         jira_project.strip() if isinstance(jira_project, str) else None,
         docs_dir,
+        base_branch.strip() if isinstance(base_branch, str) else None,
     )
 
 

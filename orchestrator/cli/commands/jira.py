@@ -1,4 +1,4 @@
-"""jira connect, jira story and jira check: the project's Jira space. All only read from Jira."""
+"""jira connect, story, check and plan: the project's Jira space. All only read from Jira."""
 
 from __future__ import annotations
 
@@ -8,11 +8,18 @@ import sys
 
 from orchestrator.cli.exit_codes import EXIT_OK, EXIT_REFUSED
 from orchestrator.core.project_config import CONFIG_FILE_NAME, load_project_config
+from orchestrator.core.runner_paths import agent_runs_root
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution.story_check import format_story_check, run_story_checks
 from orchestrator.jira.client import JiraClient
 from orchestrator.jira.connect import connect_jira, format_connection, save_jira
 from orchestrator.jira.story import format_story, read_story
+from orchestrator.planning.ai_planner import DEFAULT_PLANNER_MODEL
+from orchestrator.planning.plan_file import plan_path
+from orchestrator.planning.story_plan import format_story_plan
+from orchestrator.planning.story_planner import generate_story_plan
+from orchestrator.records.project_db import try_refresh_run
+from orchestrator.records.run_registry import new_run_id
 from orchestrator.settings import load_settings
 
 
@@ -35,6 +42,8 @@ def run_jira(args: argparse.Namespace) -> int:
         return _story(args)
     if args.jira_command == "check":
         return _check(args)
+    if args.jira_command == "plan":
+        return _plan(args)
     return _connect(args)
 
 
@@ -80,3 +89,26 @@ def _check(args: argparse.Namespace) -> int:
     print(format_story_check(result))
     print("\nNothing was written to Jira or saved.")
     return EXIT_OK if result.ready else EXIT_REFUSED
+
+
+def _plan(args: argparse.Namespace) -> int:
+    """Plan a story with a read-only AI agent and save the plan, waiting for approval."""
+    if not args.repo_path:
+        raise ExecutionRefused("No project found. Run jira plan in the project's folder.")
+    client, project = _site(args)
+    story = read_story(client, args.key, project)
+    config = load_project_config(args.repo_path)
+    run_id = args.run_id or new_run_id()
+    print(f"Planning story {story.story.key} with a read-only AI agent (run {run_id}). This "
+          "calls Claude and may take a while...", file=sys.stderr)
+    record = generate_story_plan(
+        story, args.repo_path, plans_dir=args.plans_dir, docs_dir=config.docs_dir,
+        base_ref=args.base, model=args.model or DEFAULT_PLANNER_MODEL,
+        timeout_seconds=args.timeout, max_turns=args.max_turns, run_id=run_id)
+    print(format_story_plan(record, plan_path(args.plans_dir, run_id)))
+    problem = try_refresh_run(args.plans_dir, run_id, agent_runs_root(), plans_dir=args.plans_dir)
+    if problem:
+        print(f"(The project database was not updated: {problem}. db rebuild fixes it.)",
+              file=sys.stderr)
+    print("\nNothing was written to Jira, and nothing was run. The plan waits for approval.")
+    return EXIT_OK

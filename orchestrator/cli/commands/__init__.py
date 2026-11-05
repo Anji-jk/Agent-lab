@@ -24,6 +24,7 @@ from orchestrator.cli.exit_codes import (  # noqa: F401  (re-exported)
 )
 from orchestrator.cli.parser import build_parser
 from orchestrator.core.project import Project, ensure_data_dir, find_project
+from orchestrator.core.project_config import DEFAULT_BASE_BRANCH, load_project_config
 from orchestrator.core.runner_paths import PROJECT_ROOT  # noqa: F401  (re-exported)
 from orchestrator.errors import ExecutionRefused
 from orchestrator.execution.worktrees import WorktreeError
@@ -93,6 +94,12 @@ def settle_project(args: argparse.Namespace) -> Project | None:
     return project
 
 
+def default_base(repo_path: Path | None) -> str:
+    """The branch to start from when --base is not given: the project's base_branch, or main."""
+    config = load_project_config(repo_path) if repo_path is not None else None
+    return (config.base_branch if config else None) or DEFAULT_BASE_BRANCH
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _main(argv)
@@ -106,6 +113,8 @@ def _main(argv: Sequence[str] | None) -> int:
 
     try:
         settle_project(args)
+        if hasattr(args, "base") and args.base is None:
+            args.base = default_base(args.repo_path)
         settings = load_settings()  # a bad setting stops the command here, naming it
         if hasattr(args, "repo") and args.repo is None:
             if not settings.repository:

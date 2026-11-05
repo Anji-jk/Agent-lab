@@ -81,3 +81,16 @@ def test_docs_dir_is_optional(tmp_path):
 def test_docs_dir_outside_the_project_is_refused(tmp_path, value):
     with pytest.raises(ExecutionRefused, match="docs_dir must be a folder inside the project"):
         load_project_config(write(tmp_path, f"docs_dir = {value}\n"))
+
+
+def test_base_branch_is_read(tmp_path):
+    assert getattr(load_project_config(write(tmp_path, 'base_branch = " dev "\n')), "base_branch") == "dev"
+    assert getattr(load_project_config(write(tmp_path, 'base_branch = "release/2.1"\n')), "base_branch") \
+        == "release/2.1"
+    assert getattr(ProjectConfig(), "base_branch") is None
+
+
+@pytest.mark.parametrize("value", ['"-x"', '"two words"', '"a..b"', '""', "3"])
+def test_a_bad_base_branch_is_refused(tmp_path, value):
+    with pytest.raises(ExecutionRefused, match="base_branch must be a branch name"):
+        load_project_config(write(tmp_path, f"base_branch = {value}\n"))

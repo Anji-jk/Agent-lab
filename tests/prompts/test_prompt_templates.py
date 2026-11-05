@@ -5,7 +5,7 @@ import pytest
 from orchestrator.prompts import loader
 from prompt_samples import CASES, EXPECTED  # pyright: ignore[reportMissingImports]
 
-TEMPLATES = ("builder", "tester", "reviewer", "planner",
+TEMPLATES = ("builder", "tester", "reviewer", "planner", "story_planner",
              "shared/command_rules", "shared/task_block", "shared/untrusted_note")
 
 

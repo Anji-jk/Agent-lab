@@ -7,7 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from orchestrator.execution import agents as ta
+from orchestrator.jira.story import Epic, Story, WorkItem
 from orchestrator.planning.ai_planner import build_planner_prompt
+from orchestrator.planning.story_planner import build_story_planner_prompt
 
 EXPECTED = Path(__file__).parent / "expected"
 
@@ -30,6 +32,25 @@ LONG_PLAN = SimpleNamespace(
     base_ref="main",
 )
 
+
+def _item(key, summary, description, *, done=False, blocked_by=()):
+    return WorkItem(key=key, type="Subtask", summary=summary, description=description,
+                    status="Done" if done else "To Do", done=done, labels=("cli",),
+                    priority="Medium", url=f"https://x/browse/{key}",
+                    acceptance_criteria="- It works.", blocked_by=blocked_by)
+
+
+STORY = Story(
+    WorkItem(key="KAN-10", type="Feature", summary="Export to CSV",
+             description="Users want a spreadsheet.\n\nAcceptance Criteria:\n- A CSV file.",
+             status="To Do", done=False, labels=(), priority="High", url="https://x/browse/KAN-10"),
+    Epic("KAN-9", "Reports"),
+    (_item("KAN-11", "Formatter", "Rows.\n\nAcceptance Criteria:\n- Quoted commas."),
+     _item("KAN-12", "Command", "ledger export\n\nAcceptance Criteria:\n- Prints rows.",
+           blocked_by=("KAN-11",)),
+     _item("KAN-8", "Spike", "Done before.", done=True)),
+)
+
 CASES = {
     "builder": lambda: ta.builder_prompt(ISSUE, TASK),
     "builder_retry_continue": lambda: ta.builder_prompt(ISSUE, TASK, FEEDBACK, EARLIER,
@@ -43,6 +64,8 @@ CASES = {
     "command_rules": lambda: ta.command_rules("tests/test_calc.py"),
     "planner": lambda: build_planner_prompt(PLAN, ["It checks.", "It reports."], "src/a.py\ntests/t.py"),
     "planner_no_criteria_long": lambda: build_planner_prompt(LONG_PLAN, [], "ctx"),
+    "story_planner": lambda: build_story_planner_prompt(STORY, base_ref="main", docs_dir="docs",
+                                                        context="ledger/cli.py\nREADME.md"),
 }
 
 

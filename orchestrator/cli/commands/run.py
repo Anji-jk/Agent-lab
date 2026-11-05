@@ -10,12 +10,14 @@ from orchestrator.cli.display import display_task
 from orchestrator.cli.exit_codes import (
     EXIT_INTERRUPTED, EXIT_OK, EXIT_REFUSED, EXIT_TASK_FAILED, EXIT_TASK_NEEDS_REVIEW, EXIT_USAGE,
 )
+from orchestrator.errors import ExecutionRefused
 from orchestrator.execution.background import start_task_in_background
 from orchestrator.execution.continuing import continue_task
 from orchestrator.execution.retry import retry_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.execution.worktrees import default_worktree_root, verify_remote_repository
 from orchestrator.planning.plan_file import load_task_plan
+from orchestrator.planning.story_plan import story_plan_refusal
 from orchestrator.scheduling.run_plan import format_step, max_parallel_setting
 from orchestrator.scheduling.run_plan import run_plan as work_through_plan
 from orchestrator.scheduling.run_report import build_report, format_report, save_report
@@ -64,8 +66,17 @@ def _announcement(mode: str, args: argparse.Namespace) -> str:
     }[mode]
 
 
-def run_run_task(args: argparse.Namespace) -> int:
+def _load_runnable_plan(args: argparse.Namespace) -> dict:
+    """The run's plan, refused while it is a story plan that cannot run yet."""
     plan = load_task_plan(args.plans_dir, args.run_id)
+    refusal = story_plan_refusal(plan)
+    if refusal:
+        raise ExecutionRefused(refusal)
+    return plan
+
+
+def run_run_task(args: argparse.Namespace) -> int:
+    plan = _load_runnable_plan(args)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
     if args.continue_task and args.retry_task:
         print("Use --continue for a stopped task or --retry for a failed one, not both.",
@@ -103,7 +114,7 @@ def run_task_in_background(args: argparse.Namespace) -> int:
 
 
 def run_run_plan(args: argparse.Namespace) -> int:
-    plan = load_task_plan(args.plans_dir, args.run_id)
+    plan = _load_runnable_plan(args)
     verify_remote_repository(args.repo_path, plan["config"]["repository"])
     together = max_parallel_setting(args.one_at_a_time)
     how = ("one task at a time" if together == 1 else

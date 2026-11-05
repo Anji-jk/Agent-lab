@@ -13,6 +13,7 @@ from orchestrator.planning.plan import DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECOND
 # Runs, plans and the board connection live in the project: <project>/.agent-lab/runs
 # (orchestrator/core/project.py). None here means "the project's"; cli/commands fills it in.
 PROJECT_RUNS = "(default: the project's .agent-lab/runs)"
+BASE_HELP = "Default: base_branch in .agent-lab.toml, else main."
 
 
 def _add_plan_options(
@@ -25,7 +26,7 @@ def _add_plan_options(
         default=None,
         help="GitHub repository in OWNER/REPO format (default: AGENT_LAB_REPOSITORY).",
     )
-    parser.add_argument("--base", default="main", help="Base ref for the branch.")
+    parser.add_argument("--base", default=None, help=f"Base ref for the branch. {BASE_HELP}")
     parser.add_argument(
         "--timeout",
         type=int,
@@ -233,9 +234,26 @@ def build_parser() -> argparse.ArgumentParser:
              "and its tests on the base branch. Reads only; writes nothing.",
     )
     jira_check.add_argument("key", help="The story's key, such as KAN-10.")
-    jira_check.add_argument("--base", default="main", help="The branch the run starts from.")
+    jira_check.add_argument("--base", default=None,
+                            help=f"The branch the run starts from. {BASE_HELP}")
     jira_check.add_argument("--skip-tests", action="store_true",
                             help="Do not run the project's tests (they can be slow).")
+    jira_plan = jira_commands.add_parser(
+        "plan",
+        help="Plan a story with a read-only AI agent: for each open sub-task, the files, what it "
+             "waits for and why, its size and how to verify it. Run jira check first. Saves the "
+             "plan, waiting for approval; writes nothing to Jira and runs nothing.",
+    )
+    jira_plan.add_argument("key", help="The story's key, such as KAN-10.")
+    jira_plan.add_argument("--base", default=None,
+                           help=f"The branch the run starts from. {BASE_HELP}")
+    jira_plan.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
+                           help="Planner timeout in seconds.")
+    jira_plan.add_argument("--model", help="Claude model for the planner.")
+    jira_plan.add_argument("--max-turns", type=int, default=DEFAULT_PLANNING_MAX_TURNS,
+                           help="Max planner turns.")
+    jira_plan.add_argument("--run-id", help="Use this run ID (default: generate one).")
+    jira_plan.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     report_parser = subparsers.add_parser(
         "report",

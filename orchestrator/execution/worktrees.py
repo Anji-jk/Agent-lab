@@ -21,6 +21,8 @@ from orchestrator.settings import WORKTREE_ROOT, load_settings
 
 # Conservative subset of valid ref names: no leading '-', no '..', no spaces.
 BASE_REF_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
+# A Jira story key, such as KAN-10: it becomes part of a branch name.
+STORY_KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,9}-[1-9][0-9]{0,9}")
 
 
 class WorktreeError(RuntimeError):
@@ -125,13 +127,33 @@ def plan_worktree(
     validate_run_id(run_id)
     root = resolve_repository_root(repository_root)
     branch = f"agent/issue-{issue_number}-{run_id}"
+    return root, branch, _worktree_path(root, branch, worktree_root)
+
+
+def plan_story_worktree(
+    repository_root: Path,
+    story_key: str,
+    run_id: str,
+    worktree_root: Path | None = None,
+) -> tuple[Path, str, Path]:
+    """Return the root, story branch and worktree path without changing anything."""
+    if not STORY_KEY_PATTERN.fullmatch(story_key or ""):
+        raise WorktreeError(f"Not a Jira key such as KAN-10: {story_key!r}")
+    validate_run_id(run_id)
+    root = resolve_repository_root(repository_root)
+    branch = f"agent/{story_key}-{run_id}"
+    return root, branch, _worktree_path(root, branch, worktree_root)
+
+
+def _worktree_path(root: Path, branch: str, worktree_root: Path | None) -> Path:
+    """A sibling of the repository, or a folder in ``worktree_root``, named after the branch."""
     parent = root.parent
     if worktree_root is not None:
         parent = Path(worktree_root).expanduser().resolve()
         if parent == root or root in parent.parents:
             raise WorktreeError("The worktree folder must be outside the repository.")
     worktree_path = parent / f"{root.name}-{branch.replace('/', '-')}"
-    return root, branch, worktree_path
+    return worktree_path
 
 
 def list_worktrees(repository_root: Path) -> list[WorktreeInfo]:

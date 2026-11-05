@@ -4,7 +4,7 @@
     2  github and jira (the plain clients), planning (plan model, profiles, safety screen), prompts,
        and the readers of what agents did: monitoring.progress, monitoring.event_feed,
        plus execution.worktrees (plain Git helpers that import only layer 1)
-    3  execution, and the AI planner (it runs an agent)
+    3  execution, and the AI planners (they run an agent)
     4  scheduling
     5  cli, monitoring (the screens)
 
@@ -31,6 +31,7 @@ MODULE_LAYERS = {
     "orchestrator.monitoring.event_feed": 2,
     "orchestrator.execution.worktrees": 2,
     "orchestrator.planning.ai_planner": 3,
+    "orchestrator.planning.story_planner": 3,
 }
 
 

@@ -13,6 +13,7 @@ from orchestrator.github.issue import Task
 from orchestrator.planning.ai_planner import generate_ai_plan, DEFAULT_PLANNER_MODEL
 from orchestrator.planning.plan import ExecutionPlan, build_plan
 from orchestrator.planning.plan_file import load_task_plan, plan_path
+from orchestrator.planning.story_plan import format_story_plan, is_story_plan
 
 
 def run_issue(args: argparse.Namespace) -> int:
@@ -55,5 +56,8 @@ def run_ai_plan(args: argparse.Namespace) -> int:
 
 def run_show_plan(args: argparse.Namespace) -> int:
     record = load_task_plan(args.plans_dir, args.run_id)
-    display_task_plan(record, plan_path(args.plans_dir, args.run_id))
+    if is_story_plan(record):
+        print(format_story_plan(record, plan_path(args.plans_dir, args.run_id)))
+    else:
+        display_task_plan(record, plan_path(args.plans_dir, args.run_id))
     return EXIT_OK

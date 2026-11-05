@@ -39,6 +39,7 @@ repository = "{repository}"
 # test_timeout = 600                                # seconds, 60 to 86400
 # test_example = "tests/test_example.py"            # shown to the agents as an example
 # docs_dir = "docs"                                 # optional: the folder of feature docs
+# base_branch = "main"                              # the branch plans and runs start from
 
 # Jira, for story runs (its email and API token go in .agent-lab/.env):
 # jira_url = "https://yourteam.atlassian.net"

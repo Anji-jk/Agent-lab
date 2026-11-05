@@ -30,6 +30,8 @@ MAX_TITLE = 200
 MAX_TEXT = 4000
 MAX_LIST_ITEMS = 30
 MAX_ITEM = 500
+# A Jira work item's key, such as KAN-11.
+JIRA_ISSUE_KEY = re.compile(r"[A-Z][A-Z0-9_]{0,9}-[1-9][0-9]{0,9}")
 
 
 class PlanValidationError(ValueError):
@@ -123,6 +125,7 @@ def validate_tasks(raw_tasks: object) -> list[dict[str, Any]]:
                 ),
                 "complexity": _complexity(raw.get("complexity"), f"{label} complexity"),
                 "parallel_safe": _flag(raw.get("parallel_safe"), f"{label} parallel_safe"),
+                **_story_fields(raw, label),
             }
         )
 
@@ -130,6 +133,11 @@ def validate_tasks(raw_tasks: object) -> list[dict[str, Any]]:
     if len(set(ids)) != len(ids):
         duplicated = sorted({i for i in ids if ids.count(i) > 1})
         raise PlanValidationError(f"Duplicate task ids: {', '.join(duplicated)}.")
+
+    keys = [task["jira_key"] for task in tasks if "jira_key" in task]
+    if len(set(keys)) != len(keys):
+        duplicated = sorted({key for key in keys if keys.count(key) > 1})
+        raise PlanValidationError(f"Sub-task in two tasks: {', '.join(duplicated)}.")
 
     known = set(ids)
     for task in tasks:
@@ -142,10 +150,52 @@ def validate_tasks(raw_tasks: object) -> list[dict[str, Any]]:
                 )
         if len(set(task["depends_on"])) != len(task["depends_on"]):
             raise PlanValidationError(f"Task {task['id']} lists a dependency twice.")
+        extra = set(task.get("dependency_reasons", {})) - set(task["depends_on"])
+        if extra:
+            raise PlanValidationError(
+                f"Task {task['id']} gives a reason for a task it does not depend on: "
+                f"{', '.join(sorted(extra))}.")
 
     _reject_cycles(tasks)
     _enforce_parallel_safety(tasks)
     return tasks
+
+
+def _story_fields(raw: dict[str, Any], label: str) -> dict[str, Any]:
+    """Validate optional fields added to a Jira story task."""
+    found: dict[str, Any] = {}
+    if "jira_key" in raw:
+        key = raw["jira_key"]
+        if not isinstance(key, str) or not JIRA_ISSUE_KEY.fullmatch(key):
+            raise PlanValidationError(f"{label} has an invalid jira_key: {key!r}.")
+        found["jira_key"] = key
+    if "dependency_reasons" in raw:
+        reasons = raw["dependency_reasons"]
+        if not isinstance(reasons, dict) or len(reasons) > MAX_LIST_ITEMS:
+            raise PlanValidationError(f"{label} dependency_reasons must be an object.")
+        found["dependency_reasons"] = {
+            str(task_id): _text(reason, f"{label} reason for {task_id}", limit=MAX_ITEM)
+            for task_id, reason in reasons.items()
+        }
+    if "doc_target" in raw:
+        target = raw["doc_target"]
+        if target is not None:
+            target = _relative_path(_text(target, f"{label} doc_target", limit=MAX_ITEM))
+        found["doc_target"] = target
+    if "context" in raw:
+        context = raw["context"]
+        if not isinstance(context, dict):
+            raise PlanValidationError(f"{label} context must be an object.")
+        found["context"] = {
+            "read_first": [
+                _relative_path(item)
+                for item in _string_list(context.get("read_first"), f"{label} read_first")
+            ],
+            "notes": _text(
+                context.get("notes") or "", f"{label} notes", limit=MAX_TEXT, required=False
+            ),
+        }
+    return found
 
 
 def _acceptance_criteria(value: object, label: str) -> list[str]:
