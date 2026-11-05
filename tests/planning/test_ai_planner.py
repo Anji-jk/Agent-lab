@@ -517,3 +517,28 @@ def test_a_long_issue_text_is_stored_whole(git_repo, plans_dir, runner_script):
     record = generate(plan, plans_dir, runner_script, FakePlanner())
 
     assert record["issue"]["description"] == body
+
+
+def test_a_git_hiccup_while_inspecting_the_repository_is_retried(git_repo, monkeypatch):
+    import subprocess
+    from orchestrator.planning import ai_planner
+
+    real, calls = ai_planner.run_git, []
+
+    def flaky(root, *args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired("git", 30)
+        return real(root, *args)
+
+    monkeypatch.setattr(ai_planner, "run_git", flaky)
+    monkeypatch.setattr(ai_planner.time, "sleep", lambda _s: None)
+    assert ai_planner._repository_state(git_repo)["head"] == git(git_repo, "rev-parse", "HEAD")
+
+
+def test_a_lasting_git_failure_names_the_command_and_reason(tmp_path, monkeypatch):
+    from orchestrator.planning import ai_planner
+
+    monkeypatch.setattr(ai_planner.time, "sleep", lambda _s: None)
+    with pytest.raises(ai_planner.PlanningError, match=r"git status failed \(.*not a git"):
+        ai_planner._repository_state(tmp_path)

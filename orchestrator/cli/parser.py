@@ -254,6 +254,15 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Max planner turns.")
     jira_plan.add_argument("--run-id", help="Use this run ID (default: generate one).")
     jira_plan.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    jira_approve = jira_commands.add_parser(
+        "approve",
+        help="Approve a story plan: show it, ask, add the Blocks links the planner found in "
+             "Jira (each with a comment giving the reason; never deletes), then mark the plan "
+             "approved in plan.json. Refused if the story changed in Jira since planning.",
+    )
+    jira_approve.add_argument("run_id", help="The run ID of the plan.")
+    jira_approve.add_argument("--yes", action="store_true", help="Approve without asking.")
+    jira_approve.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     report_parser = subparsers.add_parser(
         "report",

@@ -4,7 +4,7 @@ import pytest
 
 from orchestrator.planning import story_plan as sp
 from orchestrator.planning.plan_file import PlanValidationError, validate_tasks
-from story_samples import ANSWER, answer, entry, story, work_item
+from story_samples import ANSWER, SUBTASKS, answer, entry, story, work_item
 
 
 def merge(the_answer=ANSWER, the_story=None, docs_dir="docs"):
@@ -158,3 +158,27 @@ def test_story_execution_is_refused():
     assert "waiting for approval" in sp.story_plan_refusal(record())
     assert "not supported yet" in sp.story_plan_refusal(record(sp.APPROVED))
     assert sp.story_plan_refusal({"issue": {"number": 4}, "tasks": []}) is None
+
+
+def test_changes_in_jira_since_planning_are_named():
+    planned = {"tasks": merge()["tasks"]}
+    assert sp.story_changes(planned, story()) == []
+    edited = work_item("KAN-12", "Add the export command", criteria="- Prints the rows.",
+                       blocked_by=("KAN-11",))
+    closed = work_item("KAN-13", "Document the export command", done=True)
+    added = work_item("KAN-15", "Something new")
+    changed = story(SUBTASKS[0], edited, closed, added)
+    assert sp.story_changes(planned, changed) == [
+        "KAN-15 is new or reopened in Jira.",
+        "KAN-12: its description changed in Jira.",
+        "KAN-12: its acceptance criteria changed in Jira.",
+        "KAN-13 is done in Jira now."]
+    assert sp.story_changes(planned, story(SUBTASKS[0], SUBTASKS[1])) == [
+        "KAN-13 is no longer a sub-task of KAN-10."]
+
+
+def test_the_link_comment_says_why():
+    text = sp.link_comment({"subtask": "KAN-13", "blocked_by": "KAN-12", "reason": "Docs."},
+                           {"run_id": "run-1", "source": {"key": "KAN-10"}})
+    assert text == ("Blocked by KAN-12: Docs.\n(Added by Agent Lab when the plan run-1 of story "
+                    "KAN-10 was approved.)")

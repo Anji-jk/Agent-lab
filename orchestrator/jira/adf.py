@@ -29,6 +29,13 @@ def adf_to_text(document: Any) -> str:
     return text.strip()
 
 
+def text_to_adf(text: str) -> dict[str, Any]:
+    """Plain text as an ADF document: one paragraph per line, for a comment Jira will show."""
+    paragraphs = [{"type": "paragraph", "content": [{"type": "text", "text": line}]}
+                  for line in text.splitlines() if line.strip()]
+    return {"type": "doc", "version": 1, "content": paragraphs or [{"type": "paragraph"}]}
+
+
 def _children(node: dict[str, Any]) -> list[dict[str, Any]]:
     return [child for child in node.get("content") or [] if isinstance(child, dict)]
 

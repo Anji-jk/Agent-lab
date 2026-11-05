@@ -203,6 +203,37 @@ def merge_planner_output(
             "tasks": checked, "notes": review.notes, "jira_links": review.jira_links}
 
 
+def story_changes(record: dict[str, Any], story: Story) -> list[str]:
+    """What changed in Jira since the plan was made, in words; [] when nothing that matters did.
+
+    A sub-task added, removed, closed or reopened, or its title, description or acceptance
+    criteria edited: each means the plan was made from text that is no longer there.
+    """
+    planned = {task["jira_key"]: task for task in record["tasks"]}
+    try:
+        now = {task["jira_key"]: task for task in jira_tasks(story)}
+    except PlanValidationError as exc:
+        return [str(exc)]
+    found = [f"{key} is new or reopened in Jira." for key in now if key not in planned]
+    closed = {item.key for item in story.subtasks if item.done}
+    for key, task in planned.items():
+        if key not in now:
+            found.append(f"{key} is done in Jira now." if key in closed
+                         else f"{key} is no longer a sub-task of {story.story.key}.")
+            continue
+        found += [f"{key}: its {label} changed in Jira." for field, label in (
+            ("title", "title"), ("description", "description"),
+            ("acceptance_criteria", "acceptance criteria")) if task[field] != now[key][field]]
+    return found
+
+
+def link_comment(link: dict[str, str], record: dict[str, Any]) -> str:
+    """The comment that goes with a Blocks link Agent Lab adds, saying why."""
+    return (f"Blocked by {link['blocked_by']}: {link['reason']}\n"
+            f"(Added by Agent Lab when the plan {record['run_id']} of story "
+            f"{record['source']['key']} was approved.)")
+
+
 def is_story_plan(record: dict[str, Any]) -> bool:
     return (record.get("source") or {}).get("kind") == "jira"
 
@@ -268,9 +299,11 @@ def format_story_plan(record: dict[str, Any], path: object) -> str:
         lines += [f"  - {note}" for note in record["orchestrator_notes"]]
     links = approval.get("jira_links") or []
     lines.append(f"\nJira changes after approval ({len(links)}):")
-    lines += [f"  + {link['subtask']} is blocked by {link['blocked_by']}" for link in links] \
+    lines += [f"  + {link['subtask']} is blocked by {link['blocked_by']}"
+              + (f"  ({link['how']})" if link.get("how") else "") for link in links] \
         or ["  none: every dependency is already a Jira link"]
-    status = "approved" if approval.get("status") == APPROVED else "waiting for approval"
+    status = (f"approved {approval.get('approved_at', '')}".strip()
+              if approval.get("status") == APPROVED else "waiting for approval")
     lines.append(f"Status:      {status}")
     metrics = [f"{label} {format(planner[key], spec)}" for label, key, spec in (
         ("duration", "duration_seconds", ".1f"), ("cost USD", "total_cost_usd", ".4f"),

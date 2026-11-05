@@ -342,6 +342,21 @@ def save_task_plan(plans_dir: Path, run_id: str, document: dict[str, Any]) -> Pa
     return path
 
 
+def save_approval(plans_dir: Path, run_id: str, approval: dict[str, Any]) -> dict[str, Any]:
+    """Replace a story plan's ``approval`` block; every other part of plan.json stays as it is.
+
+    Used by jira approve after each link it writes, so a stop half-way keeps what was done.
+    """
+    path = plan_path(plans_dir, run_id)
+    load_task_plan(plans_dir, run_id)  # the same checks as reading it
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record.get("approval"), dict):
+        raise RunRegistryError(f"Run {run_id} is not a plan that waits for approval.")
+    record["approval"] = approval
+    write_json_atomic(path, record)
+    return load_task_plan(plans_dir, run_id)
+
+
 def load_task_plan(plans_dir: Path, run_id: str) -> dict[str, Any]:
     """Read and re-validate a stored plan."""
     path = plan_path(plans_dir, run_id)

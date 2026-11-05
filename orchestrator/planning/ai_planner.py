@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -131,17 +132,34 @@ def build_planner_prompt(
     )
 
 
+GIT_ATTEMPTS = 3
+
+
+def _state_git(root: Path, *args: str) -> str:
+    """run_git, tried again when git fails or times out (a busy disk or a held lock)."""
+    for attempt in range(1, GIT_ATTEMPTS + 1):
+        try:
+            return run_git(root, *args)
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
+            if attempt == GIT_ATTEMPTS:
+                detail = (getattr(exc, "stderr", None) or "").strip().splitlines()
+                reason = detail[-1] if detail else type(exc).__name__
+                raise PlanningError(
+                    f"Could not inspect the repository's Git state: git {args[0]} failed "
+                    f"({reason})."
+                ) from None
+            time.sleep(attempt)
+    raise AssertionError("unreachable")
+
+
 def _repository_state(root: Path) -> dict[str, str]:
     """Everything planning must leave untouched."""
-    try:
-        return {
-            "status": run_git(root, "status", "--porcelain"),
-            "head": run_git(root, "rev-parse", "HEAD"),
-            "branches": run_git(root, "branch", "--list"),
-            "worktrees": run_git(root, "worktree", "list", "--porcelain"),
-        }
-    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
-        raise PlanningError("Could not inspect the repository's Git state.") from None
+    return {
+        "status": _state_git(root, "status", "--porcelain"),
+        "head": _state_git(root, "rev-parse", "HEAD"),
+        "branches": _state_git(root, "branch", "--list"),
+        "worktrees": _state_git(root, "worktree", "list", "--porcelain"),
+    }
 
 
 def check_planning_base(root: Path, base_ref: str) -> str:

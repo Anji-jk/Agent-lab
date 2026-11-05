@@ -1,7 +1,8 @@
 """Minimal Jira Cloud client using Python's standard library.
 
-It only reads for now: ``jira connect`` and ``jira story`` need nothing else. Authentication is the Agent Lab
-user's email and API token (HTTP basic auth, as Jira Cloud expects). Neither ever appears in
+It reads, and writes two things, both for ``jira approve``: a Blocks link between two sub-tasks,
+and a comment on the blocked one saying why. It never deletes or edits anything.
+Authentication is the Agent Lab user's email and API token (HTTP basic auth, as Jira Cloud expects). Neither ever appears in
 an error message, and nothing here prints or logs them.
 """
 
@@ -14,6 +15,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from orchestrator.jira.adf import text_to_adf
+
 USER_AGENT = "agent-lab-orchestrator"
 
 
@@ -21,7 +24,10 @@ class JiraAPIError(RuntimeError):
     """A Jira request failed. The message never contains the credentials."""
 
 
-def _explain(code: int, path: str) -> str:
+def _explain(code: int, path: str, writing: bool = False) -> str:
+    if code == 403 and writing:
+        return (f"The Jira account may not change {path} (HTTP 403). It needs the Link work "
+                "items and Add comments permissions in the project.")
     if code == 401:
         return ("Jira refused the email and API token (HTTP 401). Check JIRA_EMAIL and "
                 "JIRA_API_TOKEN; an API token is made at id.atlassian.com, not your password.")
@@ -74,6 +80,43 @@ class JiraClient:
             return json.loads(body.decode("utf-8")) if body else None
         except (UnicodeError, json.JSONDecodeError):
             raise JiraAPIError(f"Jira returned something that is not JSON for {path}.") from None
+
+    def post(self, path: str, body: dict[str, Any]) -> Any:
+        """One request that changes something; ``path`` starts with /rest/."""
+        request = urllib.request.Request(
+            self.base_url + path, method="POST", data=json.dumps(body).encode("utf-8"),
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "Authorization": self._authorization, "User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                answer = response.read()
+        except urllib.error.HTTPError as exc:
+            raise JiraAPIError(_explain(exc.code, path, writing=True)) from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise JiraAPIError(f"Could not reach Jira at {self.base_url}: "
+                               f"{type(exc).__name__}.") from None
+        try:
+            return json.loads(answer.decode("utf-8")) if answer else None
+        except (UnicodeError, json.JSONDecodeError):
+            return None  # Jira answers 201 with an empty body for a new link
+
+    # --- what jira approve writes ----------------------------------------------------------
+
+    def add_blocks_link(self, blocker: str, blocked: str) -> None:
+        """Make ``blocked`` "is blocked by" ``blocker``.
+
+        Jira's names are the wrong way round for this: the issue that *blocks* goes in
+        ``inwardIssue``. jira approve reads the link back afterwards to be sure.
+        """
+        self.post("/rest/api/3/issueLink", {
+            "type": {"name": "Blocks"},
+            "inwardIssue": {"key": blocker},
+            "outwardIssue": {"key": blocked},
+        })
+
+    def add_comment(self, key: str, text: str) -> None:
+        """A comment on ``key``. (A comment sent with a link lands on the blocker instead.)"""
+        self.post(f"/rest/api/3/issue/{key}/comment", {"body": text_to_adf(text)})
 
     # --- what jira connect reads ---------------------------------------------------------
 

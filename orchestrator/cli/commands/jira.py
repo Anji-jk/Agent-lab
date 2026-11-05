@@ -1,4 +1,7 @@
-"""jira connect, story, check and plan: the project's Jira space. All only read from Jira."""
+"""jira connect, story, check, plan and approve: the project's Jira space.
+
+Only approve writes to Jira: the Blocks links of a plan it approves, each with a comment.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +18,11 @@ from orchestrator.jira.client import JiraClient
 from orchestrator.jira.connect import connect_jira, format_connection, save_jira
 from orchestrator.jira.story import format_story, read_story
 from orchestrator.planning.ai_planner import DEFAULT_PLANNER_MODEL
-from orchestrator.planning.plan_file import plan_path
-from orchestrator.planning.story_plan import format_story_plan
+from orchestrator.planning.plan_file import load_task_plan, plan_path
+from orchestrator.planning.story_approval import approve_story_plan, missing_comment
+from orchestrator.planning.story_plan import (
+    APPROVED, format_story_plan, is_story_plan, story_changes,
+)
 from orchestrator.planning.story_planner import generate_story_plan
 from orchestrator.records.project_db import try_refresh_run
 from orchestrator.records.run_registry import new_run_id
@@ -44,6 +50,8 @@ def run_jira(args: argparse.Namespace) -> int:
         return _check(args)
     if args.jira_command == "plan":
         return _plan(args)
+    if args.jira_command == "approve":
+        return _approve(args)
     return _connect(args)
 
 
@@ -111,4 +119,67 @@ def _plan(args: argparse.Namespace) -> int:
         print(f"(The project database was not updated: {problem}. db rebuild fixes it.)",
               file=sys.stderr)
     print("\nNothing was written to Jira, and nothing was run. The plan waits for approval.")
+    return EXIT_OK
+
+
+def _confirm(question: str) -> bool:
+    if not sys.stdin.isatty():
+        raise ExecutionRefused("No one to ask (not run in a terminal). Add --yes to approve.")
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _approve(args: argparse.Namespace) -> int:
+    """Approve a story plan: add its Blocks links in Jira (with the reasons), then mark it."""
+    record = load_task_plan(args.plans_dir, args.run_id)
+    if not is_story_plan(record):
+        raise ExecutionRefused(f"Run {args.run_id} is not a story plan; nothing to approve.")
+    key = record["source"]["key"]
+    path = plan_path(args.plans_dir, args.run_id)
+    approval = record.get("approval") or {}
+    comments = [link for link in approval.get("jira_links") or [] if missing_comment(link)]
+    if approval.get("status") == APPROVED and not comments:
+        print(f"The plan of story {key} is already approved. Nothing was changed.")
+        return EXIT_OK
+    client, project = _site(args)
+    story = read_story(client, key, project)
+    if approval.get("status") == APPROVED:
+        return _finish_comments(args, client, record, story, project, comments)
+    changes = story_changes(record, story)
+    if changes:
+        raise ExecutionRefused(
+            f"{key} changed in Jira since this plan was made, so it was not approved: "
+            + " ".join(changes) + f" Plan it again: jira plan {key}")
+    print(format_story_plan(record, path))
+    links = [link for link in record["approval"].get("jira_links") or []
+             if not link.get("written_at")]
+    question = (f"\nApprove this plan and add {len(links)} link(s) in Jira, each with a comment "
+                "on the blocked sub-task giving the reason?" if links
+                else "\nApprove this plan?")
+    if not args.yes and not _confirm(question):
+        print("Not approved. Nothing was changed.")
+        return EXIT_REFUSED
+    done = approve_story_plan(client, args.plans_dir, args.run_id, record, story, project)
+    print(f"\nApproved the plan of story {key}.")
+    for link in done.added:
+        print(f"  added in Jira: {link['subtask']} is blocked by {link['blocked_by']}, with a "
+              f"comment on {link['subtask']}")
+    for link in done.already:
+        print(f"  already in Jira: {link['subtask']} is blocked by {link['blocked_by']} "
+              "(no comment added)")
+    print("Nothing was run. Nothing in Jira was deleted.")
+    return EXIT_OK
+
+
+def _finish_comments(args, client, record, story, project, comments) -> int:
+    """An approved plan whose links have no comment yet: add the comments, nothing else."""
+    where = ", ".join(link["subtask"] for link in comments)
+    if not args.yes and not _confirm(
+            f"The plan is approved, but {len(comments)} comment(s) are not in Jira yet. "
+            f"Add them now, on {where}?"):
+        print("Nothing was changed.")
+        return EXIT_REFUSED
+    done = approve_story_plan(client, args.plans_dir, args.run_id, record, story, project)
+    for link in done.commented:
+        print(f"  comment added on {link['subtask']}: why it is blocked by {link['blocked_by']}")
+    print("Nothing else was changed. Nothing in Jira was deleted.")
     return EXIT_OK
