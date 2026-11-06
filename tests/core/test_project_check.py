@@ -61,11 +61,12 @@ def test_no_docs_folder_is_fine(tmp_path):
                            "file list, and no feature doc is written"]
 
 
-def test_a_docs_dir_that_does_not_exist_is_not_used(tmp_path):
+def test_a_docs_dir_that_does_not_exist_yet_is_reported(tmp_path):
     result = check_project(project(tmp_path, docs=False), ProjectConfig(docs_dir="docs"))
     assert result.docs_dir is None
-    assert result.gaps == ["docs folder docs/ (docs_dir in .agent-lab.toml) does not exist: it "
-                           "is not used until it does"]
+    assert result.gaps == ["docs folder docs/ (docs_dir in .agent-lab.toml) does not exist yet: "
+                           "the planner has no docs to read, and the first feature doc makes the "
+                           "folder on the run's branch"]
 
 
 def test_a_nested_docs_folder_works(tmp_path):

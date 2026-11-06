@@ -17,6 +17,7 @@ from orchestrator.execution.retry import retry_task
 from orchestrator.execution.task_runner import run_task
 from orchestrator.execution.worktrees import default_worktree_root, verify_remote_repository
 from orchestrator.planning.plan_file import load_task_plan
+from orchestrator.execution.feature_doc import describe as describe_doc
 from orchestrator.planning.story_plan import story_plan_refusal
 from orchestrator.scheduling.run_plan import format_step, max_parallel_setting
 from orchestrator.scheduling.run_plan import run_plan as work_through_plan
@@ -155,6 +156,11 @@ def run_run_plan(args: argparse.Namespace) -> int:
     print("\n" + text)
     print(f"Saved this report: {save_report(args.runs_dir, args.run_id, text)}")
     if result.complete:
+        if result.doc is not None:
+            print("\n" + describe_doc(result.doc))
+        elif result.doc_problem:
+            print(f"\nFeature doc: not written: {result.doc_problem} Then: write-doc "
+                  f"{args.run_id}")
         print("\nThe plan is complete. Nothing was pushed, and your own branches were not changed.")
         return EXIT_OK
     print(f"\nStopped: {result.stopped}")

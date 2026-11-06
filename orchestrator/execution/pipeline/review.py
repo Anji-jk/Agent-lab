@@ -6,6 +6,7 @@ from orchestrator.execution import agents as ta
 from orchestrator.execution import checks as tc
 from orchestrator.execution.roles import REVIEWER
 
+EVIDENCE_CHARS = 300
 
 
 class ReviewStage:
@@ -41,6 +42,9 @@ class ReviewStage:
         f.unmet = [n for n in range(1, len(self.criteria) + 1) if not report.met.get(n, False)]
         f.reviewer_problems = list(report.problems)
         f.reviewer_notes = list(report.notes)
+        # Kept for the feature doc: where the reviewer found each criterion met.
+        self.checks["review_evidence"] = {str(n): text[:EVIDENCE_CHARS]
+                                          for n, text in report.evidence.items()}
         self.log.emit("reviewer_checked", verdict=report.verdict, unmet=f.unmet,
                       problems=f.reviewer_problems)
         return True

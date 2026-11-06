@@ -12,9 +12,10 @@ the code" and "Instructions for agents" both count):
 * commands      how to run the project and its tests
 * rules         instructions every agent follows (the words "rule" and "instruction" both count)
 
-The docs folder is optional. When ``docs_dir`` in ``.agent-lab.toml`` names one that exists, the
-planner reads it before searching the code, and feature docs are written there after a story.
-Without it, the planner uses the file list and no feature doc is written.
+The docs folder is optional. When ``docs_dir`` in ``.agent-lab.toml`` names one, feature docs are
+written there at the end of a run, and the planner reads it before searching the code. A folder
+that does not exist yet is made by the first feature doc, on the run's branch. Without
+``docs_dir``, the planner uses the file list and no feature doc is written.
 
 Nothing here writes anything, calls Jira or GitHub, or starts an agent.
 """
@@ -110,7 +111,8 @@ def _docs_finding(root: Path, config: ProjectConfig) -> tuple[str | None, Findin
     if folder.is_dir():
         return config.docs_dir, Finding(True, f"docs folder {config.docs_dir}/ found")
     return None, Finding(False, f"docs folder {config.docs_dir}/ (docs_dir in .agent-lab.toml) does not "
-                                "exist: it is not used until it does")
+                                "exist yet: the planner has no docs to read, and the first feature "
+                                "doc makes the folder on the run's branch")
 
 
 def check_project(root: Path, config: ProjectConfig) -> ProjectCheck:

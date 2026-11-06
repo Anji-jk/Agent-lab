@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from orchestrator.execution import agents as ta
+from orchestrator.execution.feature_doc import documenter_prompt
 from orchestrator.jira.story import Epic, Story, WorkItem
 from orchestrator.planning.ai_planner import build_planner_prompt
 from orchestrator.planning.story_planner import build_story_planner_prompt
@@ -77,6 +78,18 @@ FINISHED = [{"id": "T1", "jira_key": "KAN-11", "title": "Write CSV formatter for
              "summary": "Added src/ledger/export.py with to_csv(rows) using the csv module.",
              "files": ["src/ledger/export.py", "tests/test_export.py"]}]
 AGENT_STORY = ta.story_of(STORY_PLAN)
+DOC_PLAN = {**STORY_PLAN, "tasks": [
+    {"id": "T1", "jira_key": "KAN-11", "title": "Write CSV formatter for entries",
+     "acceptance_criteria": ["Date, account and amount columns.", "Commas in names are quoted."]},
+    {**STORY_TASK, "depends_on": ["T1"]}]}
+DOC_RECORDS = {
+    "T1": {"checks": {"builder_summary": "Added src/ledger/export.py with to_csv(rows).",
+                      "builder_changed": ["src/ledger/export.py"],
+                      "tester_changed": ["tests/test_export.py"]}},
+    "T2": {"checks": {"builder_summary": "Added the export subcommand.",
+                      "builder_changed": ["src/ledger/__main__.py"],
+                      "tester_changed": ["tests/test_cli.py"]}},
+}
 
 CASES = {
     "builder": lambda: ta.builder_prompt(ISSUE, TASK),
@@ -93,6 +106,7 @@ CASES = {
                                              story=AGENT_STORY),
     "reviewer_story": lambda: ta.reviewer_prompt(ISSUE, STORY_TASK, "diff --git a/x b/x\n+1",
                                                  ["suite passed"], story=AGENT_STORY),
+    "documenter_story": lambda: documenter_prompt(DOC_PLAN, DOC_RECORDS),
     "command_rules": lambda: ta.command_rules("tests/test_calc.py"),
     "planner": lambda: build_planner_prompt(PLAN, ["It checks.", "It reports."], "src/a.py\ntests/t.py"),
     "planner_no_criteria_long": lambda: build_planner_prompt(LONG_PLAN, [], "ctx"),

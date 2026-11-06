@@ -188,6 +188,48 @@ def merge_task(
         return Merged(branch, kind, head, suite)
 
 
+def commit_file(runs_dir: Path, run_id: str, path: str, text: str, message: str) -> str:
+    """Write one new file in the run's branch worktree and commit it there; returns the commit.
+
+    Used for the feature doc. Under the same lock as a merge, so it never lands half-way
+    through one. Refuses to replace a file that exists.
+    """
+    lock_dir = run_directory(Path(runs_dir), run_id) / LOCK_FOLDER
+    with locked(lock_dir, timeout=LOCK_MARGIN_SECONDS):
+        data = load_integration(runs_dir, run_id)
+        if data is None:
+            raise MergeProblem(f"Run {run_id} has no branch yet.", "error")
+        worktree = Path(data["worktree_path"])
+        if tc.changed_paths(worktree):
+            raise MergeProblem(f"The run's branch worktree {worktree} has uncommitted changes, "
+                               "so nothing was committed there.", "error")
+        target = worktree / path
+        if target.exists():
+            raise MergeProblem(f"{path} exists on the run's branch already; it is not replaced.",
+                               "error")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="\n")
+        _git(worktree, "add", "--", path)
+        _git(worktree, "commit", "--no-verify", "-m", message)
+        head = tc.head_commit(worktree)
+        data["head"] = head
+        write_json_atomic(integration_path(runs_dir, run_id), data)
+        return head
+
+
+def record_documentation(runs_dir: Path, run_id: str, documentation: dict[str, Any]) -> None:
+    """Note the feature doc in integration.json (not as a merge: it is no task's)."""
+    lock_dir = run_directory(Path(runs_dir), run_id) / LOCK_FOLDER
+    with locked(lock_dir, timeout=LOCK_MARGIN_SECONDS):
+        data = load_integration(runs_dir, run_id) or {}
+        earlier = data.get("documentation")
+        if isinstance(earlier, dict):  # write-doc --again: the older doc stays listed
+            data["earlier_documentation"] = [*(data.get("earlier_documentation") or []),
+                                             earlier]
+        data["documentation"] = documentation
+        write_json_atomic(integration_path(runs_dir, run_id), data)
+
+
 # --- showing it -----------------------------------------------------------------------
 
 

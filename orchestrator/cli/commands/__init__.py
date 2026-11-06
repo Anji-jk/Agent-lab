@@ -16,7 +16,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from orchestrator.cli.commands import board, budget, db, jira, monitor, plan, run, setup, task
+from orchestrator.cli.commands import (
+    board, budget, db, doc, jira, monitor, plan, run, setup, task,
+)
 from orchestrator.cli.display import display_task  # noqa: F401  (re-exported)
 from orchestrator.cli.exit_codes import (  # noqa: F401  (re-exported)
     EXIT_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_PLANNING_FAILED, EXIT_REFUSED, EXIT_TASK_FAILED,
@@ -50,6 +52,7 @@ HANDLERS = {
     "board": (board, "run_board"),
     "jira": (jira, "run_jira"),
     "db": (db, "run_db"),
+    "write-doc": (doc, "run_write_doc"),
     "status": (monitor, "run_status_command"),
     "dashboard": (monitor, "run_dashboard"),
 }
@@ -58,7 +61,7 @@ HANDLERS = {
 # Commands that make worktrees in, or plan from, the project's checkout.
 NEEDS_CHECKOUT = frozenset({"ai-plan", "run-task", "run-plan"})
 # Commands that need a project but make its folder themselves.
-NEEDS_PROJECT = NEEDS_CHECKOUT | {"init", "check"}
+NEEDS_PROJECT = NEEDS_CHECKOUT | {"init", "check", "write-doc"}
 
 
 def settle_project(args: argparse.Namespace) -> Project | None:

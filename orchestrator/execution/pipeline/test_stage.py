@@ -47,6 +47,8 @@ class TestingStage:
         f.weakened_tests = tc.removed_test_lines(self.worktree, tc.changed_paths(self.worktree), TEST_DIRS)
 
         f.uncovered = dict(report.uncovered)
+        # Kept for the feature doc (execution/feature_doc.py): which test checks which criterion.
+        self.checks["coverage"] = {str(n): list(tests) for n, tests in report.coverage.items()}
         f.suspected_defects = list(report.suspected_defects)
         f.tester_notes = list(report.notes)
         f.unnamed = [

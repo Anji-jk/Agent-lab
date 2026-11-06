@@ -70,6 +70,8 @@ from orchestrator.execution import task_runner as tr
 from orchestrator.execution.cancel import command_line, is_plan_process
 from orchestrator.execution.continuing import continue_task, limit_not_reset
 from orchestrator.execution.diagnose import when_text
+from orchestrator.execution.feature_doc import DocProblem, FeatureDoc, write_feature_doc
+from orchestrator.execution.integration import MergeProblem
 from orchestrator.execution.retry import retry_problem, retry_task
 from orchestrator.planning.plan_file import load_task_plan
 from orchestrator.records.run_registry import run_directory, utc_now
@@ -115,6 +117,8 @@ class PlanRun:
     stopped: str | None = None   # why it stopped before the plan was complete
     refused: bool = False        # a step was refused before it started (budget, not ready...)
     progress: PlanProgress | None = None
+    doc: FeatureDoc | None = None  # the feature doc, once every task is done
+    doc_problem: str | None = None  # why it could not be written (the run is complete anyway)
 
     @property
     def complete(self) -> bool:
@@ -363,6 +367,7 @@ def run_plan(
                 decision = next_actions(result.progress, list_tasks(runs_dir, run_id),
                                         set(running), safe, max_parallel)
                 if decision.complete:
+                    _document(result, run_id, common)
                     return result
                 halt = decision.stop
                 for action, task_id in decision.start:
@@ -413,6 +418,17 @@ def run_plan(
         raise
     finally:
         release_lock(lock)
+
+
+def _document(result: PlanRun, run_id: str, common: dict[str, Any]) -> None:
+    """Every task is done: write the feature doc. A problem with it never fails the run."""
+    try:
+        result.doc = write_feature_doc(
+            run_id, plans_dir=common["plans_dir"], runs_dir=common["runs_dir"],
+            repo_path=common["repo_path"], runner_script=common["runner_script"],
+            invoke_runner=common["invoke_runner"])
+    except (DocProblem, MergeProblem, ExecutionRefused, OSError, ValueError) as exc:
+        result.doc_problem = str(exc)
 
 
 def _limit_resets(record: dict[str, Any]) -> str | None:

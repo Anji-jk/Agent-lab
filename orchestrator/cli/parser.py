@@ -7,6 +7,9 @@ from pathlib import Path
 
 from orchestrator.cli.exit_codes import EPILOG
 from orchestrator.monitoring import dashboard as dash
+from orchestrator.execution.feature_doc import (
+    DOCUMENTER_MAX_TURNS, DOCUMENTER_MODEL, DOCUMENTER_TIMEOUT,
+)
 from orchestrator.planning.ai_planner import DEFAULT_PLANNING_MAX_TURNS
 from orchestrator.planning.plan import DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS
 
@@ -191,6 +194,24 @@ def build_parser() -> argparse.ArgumentParser:
                                    "tasks that did not finish.")):
         db_command = db_commands.add_parser(name, help=text)
         db_command.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
+
+    doc_parser = subparsers.add_parser(
+        "write-doc",
+        help="Write the feature doc of a run whose tasks are all done (run-plan does it on its "
+             "own at the end): a read-only documenter writes what it does, how to use it and how "
+             "it works; the orchestrator adds how it was built, the tests and the run record "
+             "from its records. Committed on the run's branch in docs_dir; never replaces a file.",
+    )
+    doc_parser.add_argument("run_id", help="The run ID.")
+    doc_parser.add_argument("--again", action="store_true",
+                            help="Write a new doc even if the run has one (as a new file).")
+    doc_parser.add_argument("--model", default=DOCUMENTER_MODEL, help="Claude model.")
+    doc_parser.add_argument("--timeout", type=int, default=DOCUMENTER_TIMEOUT,
+                            help="Documenter timeout in seconds.")
+    doc_parser.add_argument("--max-turns", type=int, default=DOCUMENTER_MAX_TURNS,
+                            help="Max documenter turns.")
+    doc_parser.add_argument("--plans-dir", type=Path, default=None, help=PROJECT_RUNS)
+    doc_parser.add_argument("--runs-dir", type=Path, default=None, help=PROJECT_RUNS)
 
     jira_parser = subparsers.add_parser(
         "jira", help="The project's Jira space (optional; the GitHub board is not affected).",
