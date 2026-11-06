@@ -1,11 +1,12 @@
 """Retry a failed task once, with what went wrong.
 
 Many failures are fixed once the builder is told precisely what was wrong; more
-than one retry mostly pays for the same mistake again. So a task that ended
-``failed`` gets exactly one more attempt: a fresh worktree and branch from the
-run's current head, and a fresh builder whose prompt carries what the checks
-found. If that fails too, the task stays ``failed`` and plan progress blocks
-its dependents as before.
+than one retry mostly pays for the same mistake again. So by default a task that
+ended ``failed`` gets one more attempt (``max_retries`` in .agent-lab.toml, 0 to 5,
+changes that; the task record keeps the value it ran with): a fresh worktree and
+branch from the run's current head, and a fresh builder whose prompt carries what
+the checks found. When the retries are used up, the task stays ``failed`` and plan
+progress blocks its dependents as before.
 
 Only ``failed`` is retried. ``needs_review`` (a crash, a timeout, an unusable
 report) means the pipeline could not judge the work, so a person looks. A task
@@ -29,6 +30,7 @@ from orchestrator.errors import ExecutionRefused
 from orchestrator.execution import runner_adapter
 from orchestrator.execution import task_runner as tr
 from orchestrator.core.attempts import attempt_of
+from orchestrator.core.project_config import DEFAULT_MAX_RETRIES
 from orchestrator.core.secrets import mask_secrets
 from orchestrator.records.run_registry import locked
 from orchestrator.records.task_events import TASK_EVENTS_FILE_NAME
@@ -36,7 +38,7 @@ from orchestrator.records.task_registry import (
     LAUNCH_FILE_NAME, LOG_FILE_NAME, TASK_RECORD_NAME, load_task, task_directory,
 )
 
-MAX_RETRIES = 1  # a continued attempt is not a retry, so attempts are not counted
+MAX_RETRIES = DEFAULT_MAX_RETRIES  # a continued attempt is not a retry, so not counted
 MAX_ATTEMPTS = 9  # as for continuing: keeps the "-r<n>" names one digit
 MAX_REASONS = 12
 REASON_CHARS = 600
@@ -53,9 +55,15 @@ def retry_problem(record: dict[str, Any]) -> str | None:
         return f"{task_id} is {status}; only a failed task is retried.{extra}"
     attempt = attempt_of(record)
     failed_before = [p for p in record.get("previous_attempts") or [] if p.get("status") == "failed"]
-    if len(failed_before) >= MAX_RETRIES:
-        return (f"{task_id} has already been retried (attempt {failed_before[-1].get('attempt')} "
-                f"failed, and attempt {attempt} failed too); it stays failed.")
+    allowed = record.get("max_retries", MAX_RETRIES)
+    if not isinstance(allowed, int) or isinstance(allowed, bool):
+        allowed = MAX_RETRIES
+    if allowed == 0:
+        return f"{task_id} failed, and max_retries is 0 in .agent-lab.toml; it stays failed."
+    if len(failed_before) >= allowed:
+        times = "once" if allowed == 1 else f"{allowed} times"
+        return (f"{task_id} has already been retried {times} (attempt {attempt} failed too); "
+                "it stays failed.")
     if attempt >= MAX_ATTEMPTS:
         return f"{task_id} has had {attempt} attempts; a person should look at it."
     if not record.get("branch"):

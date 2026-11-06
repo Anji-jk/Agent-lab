@@ -28,7 +28,8 @@ class TestingStage:
         changed_by_builder = self.checks["builder_changed"]
         outcome = self.call(
             TESTER, ta.tester_prompt(self.ctx.plan["issue"], self.task, changed_by_builder,
-                                     self.earlier, self.test_example)
+                                     self.earlier, self.test_example,
+                                     story=ta.story_of(self.ctx.plan))
         )
         if outcome.outcome != "success":
             return False

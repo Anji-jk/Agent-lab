@@ -43,19 +43,88 @@ def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n... (truncated)"
 
 
-def _task_block(issue: dict, task: dict) -> str:
+def story_of(plan: dict) -> dict | None:
+    """What a story plan's prompts show of the story, or None for an Issue plan."""
+    source = plan.get("source") or {}
+    if source.get("kind") != "jira":
+        return None
+    issue, epic = plan.get("issue") or {}, source.get("epic")
+    return {"key": source.get("key"), "title": issue.get("title", ""),
+            "description": issue.get("description") or "", "count": len(plan.get("tasks") or []),
+            "epic": f"{epic['key']} {epic['summary']}" if epic else "(none)"}
+
+
+def _wording(story: dict | None) -> dict[str, str]:
+    """What the rules call the work: the Issue, or the story's sub-task."""
+    if story is None:
+        return {"item": "Issue", "item_source": "the Issue"}
+    return {"item": "sub-task", "item_source": "Jira (the story and its sub-task)"}
+
+
+def _task_fields(task: dict) -> dict[str, str]:
+    return {
+        "task_id": task["id"],
+        "task_title": task["title"],
+        "task_description": task.get("description", ""),
+        "expected_outcome": task.get("expected_outcome", ""),
+        "files": ", ".join(task.get("files") or []) or "(not specified)",
+        "criteria": _bullets(task["acceptance_criteria"]),
+    }
+
+
+def _task_block(issue: dict, task: dict, story: dict | None = None) -> str:
+    if story is not None:
+        return render(
+            "shared/story_block",
+            story_key=story["key"],
+            story_title=story["title"],
+            epic=story["epic"],
+            story_description=_cut(story["description"], MAX_ISSUE_CHARS),
+            subtask_key=task.get("jira_key") or task["id"],
+            task_count=story["count"],
+            **_task_fields(task),
+        )
     return render(
         "shared/task_block",
         issue_number=issue.get("number"),
         issue_title=issue.get("title", ""),
         issue_description=_cut(issue.get("description") or "", MAX_ISSUE_CHARS),
-        task_id=task["id"],
-        task_title=task["title"],
-        task_description=task.get("description", ""),
-        expected_outcome=task.get("expected_outcome", ""),
-        files=", ".join(task.get("files") or []) or "(not specified)",
-        criteria=_bullets(task["acceptance_criteria"]),
+        **_task_fields(task),
     )
+
+
+def _plan_block(task: dict) -> str:
+    """The planner's direction for a story sub-task; empty for an Issue task, which has none."""
+    context = task.get("context")
+    if not isinstance(context, dict):
+        return ""
+    reasons = task.get("dependency_reasons") or {}
+    waits = [f"{other}: {_cut(str(reasons.get(other, '')), MAX_TEXT_FIELD)}"
+             for other in task.get("depends_on") or []]
+    return render(
+        "shared/plan_block",
+        read_first=", ".join(context.get("read_first") or []) or "(nothing named)",
+        notes=_cut(" ".join(str(context.get("notes") or "").split()), MAX_ISSUE_CHARS // 2)
+        or "(none)",
+        waits_for="; ".join(waits) or "nothing",
+        verification="\n".join(f"- {step}" for step in task.get("verification") or [])
+        or "- (none named)",
+    )
+
+
+def _done_block(finished: list[dict] | None) -> str:
+    """The tasks this one depends on, as the orchestrator recorded them when they finished."""
+    if not finished:
+        return ""
+    items = []
+    for item in finished:
+        name = item["id"] + (f" ({item['jira_key']})" if item.get("jira_key") else "")
+        commit = f", commit {str(item['commit'])[:12]}" if item.get("commit") else ""
+        summary = " ".join(str(item.get("summary") or "(no summary recorded)").split())
+        items.append(f"- {name} {item['title']}: done{commit}.\n"
+                     f"  Summary: {_cut(summary, MAX_TEXT_FIELD)}\n"
+                     f"  Files: {', '.join(item.get('files') or []) or '(none recorded)'}")
+    return render("shared/done_block", finished="\n".join(items))
 
 
 def command_rules(test_example: str = DEFAULT_TEST_EXAMPLE) -> str:
@@ -77,24 +146,33 @@ def _earlier_block(earlier: str | None) -> str:
 
 
 def builder_prompt(issue: dict, task: dict, feedback: str | None = None,
-                   earlier: str | None = None, test_example: str = DEFAULT_TEST_EXAMPLE) -> str:
+                   earlier: str | None = None, test_example: str = DEFAULT_TEST_EXAMPLE,
+                   story: dict | None = None, finished: list[dict] | None = None) -> str:
+    """``story`` (from ``story_of``) for a story plan's task; ``finished``: the tasks it waits
+    for that are done, from ``finished_dependencies``."""
     return render(
         "builder",
-        task_block=_task_block(issue, task),
+        task_block=_task_block(issue, task, story),
+        plan_block=_plan_block(task),
+        done_block=_done_block(finished),
         feedback_block=f"\nProblems found by an earlier attempt:\n{feedback}\n" if feedback else "",
         earlier_block=_earlier_block(earlier),
         test_example=test_example,
+        item_source=_wording(story)["item_source"],
     )
 
 
 def tester_prompt(issue: dict, task: dict, changed_files: list[str],
-                  earlier: str | None = None, test_example: str = DEFAULT_TEST_EXAMPLE) -> str:
+                  earlier: str | None = None, test_example: str = DEFAULT_TEST_EXAMPLE,
+                  story: dict | None = None) -> str:
     return render(
         "tester",
-        task_block=_task_block(issue, task),
+        task_block=_task_block(issue, task, story),
+        plan_block=_plan_block(task),
         changed_files=", ".join(changed_files) or "(none)",
         earlier_block=_earlier_block(earlier),
         test_example=test_example,
+        **_wording(story),
     )
 
 
@@ -103,8 +181,10 @@ def reviewer_prompt(
     task: dict,
     diff: str,
     facts: list[str],
+    story: dict | None = None,
 ) -> str:
-    fields = {"task_block": _task_block(issue, task), "facts": _bullets(facts)}
+    fields = {"task_block": _task_block(issue, task, story), "plan_block": _plan_block(task),
+              "facts": _bullets(facts), **_wording(story)}
     # What the prompt is without the diff, to see how much of the diff fits. 2 is the length
     # of the "{}" the diff used to replace and 20 leaves room for the truncation marker.
     room = MAX_PROMPT_CHARS - len(render("reviewer", diff="", **fields)) - 2 - 20

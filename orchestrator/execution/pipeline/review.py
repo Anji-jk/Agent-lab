@@ -26,7 +26,8 @@ class ReviewStage:
         ]
         diff = tc.diff_text(self.worktree)
         outcome = self.call(
-            REVIEWER, ta.reviewer_prompt(self.ctx.plan["issue"], self.task, diff, facts)
+            REVIEWER, ta.reviewer_prompt(self.ctx.plan["issue"], self.task, diff, facts,
+                                         story=ta.story_of(self.ctx.plan))
         )
         if outcome.outcome != "success":
             return False

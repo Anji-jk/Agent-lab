@@ -364,6 +364,8 @@ def run_task(
         # A continued task keeps the base its worktree was made from, not the run's head now.
         "base_commit": (continue_from or {}).get("base_commit", ctx.base_commit),
         "roles": {name: s.describe() for name, s in ctx.settings.items()},
+        # How often run-plan may retry it, from .agent-lab.toml when the task started.
+        "max_retries": config.max_retries,
         # The process running this pipeline, for cancel and for spotting one that died.
         "pid": os.getpid(),
         **({"attempt": attempt, "previous_attempts": previous_attempts or []} if attempt > 1 else {}),

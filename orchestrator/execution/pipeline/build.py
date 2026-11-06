@@ -5,6 +5,7 @@ from __future__ import annotations
 from orchestrator.execution.pipeline.base import TEST_DIRS
 from orchestrator.execution import agents as ta
 from orchestrator.execution import checks as tc
+from orchestrator.execution.finished import SUMMARY_CHARS, finished_dependencies
 from orchestrator.execution.roles import BUILDER
 
 
@@ -17,14 +18,18 @@ class BuildStage:
         f = self.findings
         self.reused.pop(BUILDER, None)  # this stage's agent is run again, not reused
         self.set_status("building")
-        outcome = self.call(BUILDER, ta.builder_prompt(self.ctx.plan["issue"], self.task, self.feedback,
-                                                       self.earlier, self.test_example))
+        finished = finished_dependencies(self.runs_dir, self.run_id, self.ctx.plan, self.task)
+        outcome = self.call(BUILDER, ta.builder_prompt(
+            self.ctx.plan["issue"], self.task, self.feedback, self.earlier, self.test_example,
+            story=ta.story_of(self.ctx.plan), finished=finished))
         if outcome.outcome != "success":
             return False
         report = self.report(BUILDER, outcome, ta.parse_builder)
         if report is None:
             return False
         f.builder_ok = True
+        # Kept for the builders of the tasks that depend on this one (execution/finished.py).
+        self.checks["builder_summary"] = report.summary[:SUMMARY_CHARS]
         f.builder_blocked = (report.blocker or "no reason given") if report.blocked else ""
         # The worktree started clean, so every changed file is the builder's.
         self.after_build = tc.snapshot(self.worktree)

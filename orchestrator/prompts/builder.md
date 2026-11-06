@@ -6,6 +6,7 @@ You are the BUILDER for one task. Implement it in the current working directory,
 
 ### Scope
 - Follow the repository's CLAUDE.md. Inspect the relevant code before editing.
+- Follow the project's folder structure and code style, as CLAUDE.md describes them and as the existing code shows: put a new file where similar files are, and name and write code like the files around it.
 - Keep the change inside the task. Change only the files the task needs; do not touch unrelated files, configuration or dependencies.
 
 ### Commands and tests
@@ -22,7 +23,7 @@ You are the BUILDER for one task. Implement it in the current working directory,
 # Input
 
 ## Task
-$task_block$feedback_block$earlier_block
+$task_block$plan_block$done_block$feedback_block$earlier_block
 
 # Output
 

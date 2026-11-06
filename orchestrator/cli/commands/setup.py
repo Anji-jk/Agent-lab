@@ -40,6 +40,7 @@ repository = "{repository}"
 # test_example = "tests/test_example.py"            # shown to the agents as an example
 # docs_dir = "docs"                                 # optional: the folder of feature docs
 # base_branch = "main"                              # the branch plans and runs start from
+# max_retries = 1                                   # retries of a failed task (0 to 5)
 
 # Jira, for story runs (its email and API token go in .agent-lab/.env):
 # jira_url = "https://yourteam.atlassian.net"

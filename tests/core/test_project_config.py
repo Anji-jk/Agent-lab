@@ -94,3 +94,15 @@ def test_base_branch_is_read(tmp_path):
 def test_a_bad_base_branch_is_refused(tmp_path, value):
     with pytest.raises(ExecutionRefused, match="base_branch must be a branch name"):
         load_project_config(write(tmp_path, f"base_branch = {value}\n"))
+
+
+def test_max_retries_is_read(tmp_path):
+    assert getattr(load_project_config(write(tmp_path, "max_retries = 3\n")), "max_retries") == 3
+    assert getattr(load_project_config(write(tmp_path, "max_retries = 0\n")), "max_retries") == 0
+    assert getattr(ProjectConfig(), "max_retries") == 1
+
+
+@pytest.mark.parametrize("value", ["6", "-1", "true", '"2"', "1.5"])
+def test_a_bad_max_retries_is_refused(tmp_path, value):
+    with pytest.raises(ExecutionRefused, match="max_retries must be a whole number from 0 to 5"):
+        load_project_config(write(tmp_path, f"max_retries = {value}\n"))

@@ -13,6 +13,7 @@ shown to the agents) is read from this file. A missing file means the defaults.
     jira_project = "LEDG"                              # optional: its Jira space (project key)
     docs_dir = "docs"                                  # optional: its folder of feature docs
     base_branch = "dev"                                # optional: the branch runs start from
+    max_retries = 1                                    # optional: retries of a failed task, 0-5
 
     [profiles.small]                                   # optional: change a task size
     model = "opus"                                     # (config/profiles.toml is the default)
@@ -31,8 +32,11 @@ CONFIG_FILE_NAME = ".agent-lab.toml"
 DEFAULT_TEST_EXAMPLE = "tests/test_example.py"
 TIMEOUT_RANGE = (60, 86400)
 KNOWN_KEYS = frozenset({"test_command", "python", "test_timeout", "test_example", "repository",
-                        "profiles", "jira_url", "jira_project", "docs_dir", "base_branch"})
+                        "profiles", "jira_url", "jira_project", "docs_dir", "base_branch",
+                        "max_retries"})
 DEFAULT_BASE_BRANCH = "main"
+DEFAULT_MAX_RETRIES = 1  # one more attempt, told what was wrong
+RETRIES_RANGE = (0, 5)
 # A branch name: it is given to Git, so no leading "-" and no spaces (checked again by Git).
 BRANCH_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 # A Jira project key: a capital letter, then capitals, digits or _ (Jira's default rule), 2-10 long.
@@ -51,10 +55,21 @@ class ProjectConfig:
     jira_project: str | None = None  # the Jira project (space) key, such as LEDG
     docs_dir: str | None = None  # the feature docs folder, relative to the root, with / only
     base_branch: str | None = None  # the branch plans and runs start from; None means main
+    max_retries: int = DEFAULT_MAX_RETRIES  # how often run-plan retries a failed task
 
 
 def _bad(name: str, why: str) -> ExecutionRefused:
     return ExecutionRefused(f"{CONFIG_FILE_NAME}: {name} {why}.")
+
+
+def _max_retries(value: object) -> int:
+    if value is None:
+        return DEFAULT_MAX_RETRIES
+    if not (isinstance(value, int) and not isinstance(value, bool)
+            and RETRIES_RANGE[0] <= value <= RETRIES_RANGE[1]):
+        raise _bad("max_retries", f"must be a whole number from {RETRIES_RANGE[0]} to "
+                                  f"{RETRIES_RANGE[1]}")
+    return value
 
 
 def _docs_dir(value: object) -> str | None:
@@ -135,6 +150,7 @@ def parse_project_config(data: dict[str, object]) -> ProjectConfig:
         jira_project.strip() if isinstance(jira_project, str) else None,
         docs_dir,
         base_branch.strip() if isinstance(base_branch, str) else None,
+        _max_retries(data.get("max_retries")),
     )
 
 

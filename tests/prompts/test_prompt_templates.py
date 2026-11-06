@@ -6,7 +6,8 @@ from orchestrator.prompts import loader
 from prompt_samples import CASES, EXPECTED  # pyright: ignore[reportMissingImports]
 
 TEMPLATES = ("builder", "tester", "reviewer", "planner", "story_planner",
-             "shared/command_rules", "shared/task_block", "shared/untrusted_note")
+             "shared/command_rules", "shared/task_block", "shared/untrusted_note",
+             "shared/story_block", "shared/plan_block", "shared/done_block")
 
 
 @pytest.mark.parametrize("name", sorted(CASES))

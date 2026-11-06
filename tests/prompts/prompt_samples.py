@@ -51,6 +51,33 @@ STORY = Story(
      _item("KAN-8", "Spike", "Done before.", done=True)),
 )
 
+# A sub-task of a Jira story plan, as jira plan stores it, and what the agents are shown.
+STORY_PLAN = {
+    "source": {"kind": "jira", "key": "KAN-10", "url": "https://x/browse/KAN-10",
+               "epic": {"key": "KAN-9", "summary": "Reports"}},
+    "issue": {"repository": None, "number": None, "key": "KAN-10",
+              "title": "Export ledger entries to CSV",
+              "description": "Users want their entries in a spreadsheet."},
+    "tasks": [{"id": "T1"}, {"id": "T2"}, {"id": "T3"}],
+}
+STORY_TASK = {
+    "id": "T2", "jira_key": "KAN-12", "title": "Add the export command",
+    "description": "ledger export --out file.csv", "depends_on": ["T1"],
+    "dependency_reasons": {"T1": "The command calls the CSV formatter that KAN-11 adds."},
+    "expected_outcome": "ledger export --out f.csv writes the file and prints the row count.",
+    "files": ["src/ledger/__main__.py", "tests/test_cli.py"],
+    "verification": ["python -m pytest -q tests/test_cli.py"],
+    "acceptance_criteria": ["Command writes the file and prints how many rows."],
+    "doc_target": None,
+    "context": {"read_first": ["CLAUDE.md", "src/ledger/__main__.py"],
+                "notes": "main() sends every command except add to _list; dispatch by command."},
+}
+FINISHED = [{"id": "T1", "jira_key": "KAN-11", "title": "Write CSV formatter for entries",
+             "commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+             "summary": "Added src/ledger/export.py with to_csv(rows) using the csv module.",
+             "files": ["src/ledger/export.py", "tests/test_export.py"]}]
+AGENT_STORY = ta.story_of(STORY_PLAN)
+
 CASES = {
     "builder": lambda: ta.builder_prompt(ISSUE, TASK),
     "builder_retry_continue": lambda: ta.builder_prompt(ISSUE, TASK, FEEDBACK, EARLIER,
@@ -61,6 +88,11 @@ CASES = {
     "reviewer": lambda: ta.reviewer_prompt(ISSUE, TASK, "diff --git a/x b/x\n+1", ["suite passed", "2 files"]),
     "reviewer_huge_diff": lambda: ta.reviewer_prompt(ISSUE, TASK, "d" * 200_000, ["suite passed"]),
     "reviewer_no_facts": lambda: ta.reviewer_prompt(ISSUE, BARE_TASK, "", []),
+    "builder_story": lambda: ta.builder_prompt(ISSUE, STORY_TASK, story=AGENT_STORY, finished=FINISHED),
+    "tester_story": lambda: ta.tester_prompt(ISSUE, STORY_TASK, ["src/ledger/__main__.py"],
+                                             story=AGENT_STORY),
+    "reviewer_story": lambda: ta.reviewer_prompt(ISSUE, STORY_TASK, "diff --git a/x b/x\n+1",
+                                                 ["suite passed"], story=AGENT_STORY),
     "command_rules": lambda: ta.command_rules("tests/test_calc.py"),
     "planner": lambda: build_planner_prompt(PLAN, ["It checks.", "It reports."], "src/a.py\ntests/t.py"),
     "planner_no_criteria_long": lambda: build_planner_prompt(LONG_PLAN, [], "ctx"),
